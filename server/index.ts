@@ -2,6 +2,7 @@ import { actionSchema, ApiFailure, assertOrigin, assertRole, currentUser, errorR
 import { clearSettings, explainFailure, publicSettings, saveSettings, testModel, type ConversationTurn } from './model';
 import { executeAction } from './workflow';
 import { planAgentTurn } from './agent';
+import { skills, type Kind } from './skills';
 
 type StoredProposal = { id: string; user_id: number; actions_json: string; status: string; next_index: number; results_json: string; expires_at: string };
 function json(data: unknown, status = 200) { return Response.json({ data }, { status, headers: { 'Cache-Control': 'no-store' } }); }
@@ -38,7 +39,7 @@ async function handler(request: Request, env: Env): Promise<Response> {
     return json(await mainApi<Schedule[]>(env, request, `/schedules/export-data?${filters.toString()}`));
   }
   if (path === '/interpret' && request.method === 'POST') {
-    const body = await parseBody<{ input?: unknown; context?: unknown; pendingActions?: unknown }>(request);
+    const body = await parseBody<{ input?: unknown; context?: unknown; pendingActions?: unknown; activeIntent?: unknown }>(request);
     if (typeof body.input !== 'string' || !body.input.trim() || body.input.length > 1000) throw new ApiFailure(422, 'INVALID_INPUT', '请输入不超过 1000 字的指令');
     const now = Math.floor(Date.now() / 1000);
     const throttle = await env.AI_DB.prepare(`INSERT INTO model_call_cooldowns (user_id, next_allowed_at) VALUES (?, ?)
@@ -51,14 +52,16 @@ async function handler(request: Request, env: Env): Promise<Response> {
       .slice(-8).map((item) => ({ role: item.role, text: item.text.slice(0, 500) })) : [];
     const pendingActions = Array.isArray(body.pendingActions) ? body.pendingActions.slice(0, 3)
       .map((item) => actionSchema.safeParse(item)).filter((result) => result.success).map((result) => result.data) : [];
-    const plan = await planAgentTurn(env, request, user, body.input, context, pendingActions);
-    if (!plan.actions.length || plan.question) return json({ reply: plan.reply, question: plan.question, actions: plan.actions });
-    if (!plan.hasWrites) return json({ reply: plan.reply, actions: plan.actions });
+    const activeIntent = typeof body.activeIntent === 'string' && Object.hasOwn(skills, body.activeIntent)
+      ? body.activeIntent as Kind : undefined;
+    const plan = await planAgentTurn(env, request, user, body.input, context, pendingActions, activeIntent);
+    if (!plan.actions.length || plan.question) return json({ reply: plan.reply, question: plan.question, actions: plan.actions, intentKind: plan.intentKind });
+    if (!plan.hasWrites) return json({ reply: plan.reply, actions: plan.actions, intentKind: plan.intentKind });
     const id = crypto.randomUUID();
     await env.AI_DB.prepare("DELETE FROM proposals WHERE expires_at < datetime('now')").run();
     await env.AI_DB.prepare("INSERT INTO proposals (id, user_id, actions_json, status, expires_at) VALUES (?, ?, ?, 'PENDING', datetime('now', '+15 minutes'))")
       .bind(id, user.id, JSON.stringify(plan.actions)).run();
-    return json({ proposalId: id, expiresInMinutes: 15, actions: plan.actions });
+    return json({ proposalId: id, expiresInMinutes: 15, actions: plan.actions, intentKind: plan.intentKind });
   }
   if (path === '/confirm' && request.method === 'POST') {
     const body = await parseBody<{ proposalId?: string; selections?: Record<string, number>; approvals?: number[]; passwords?: Record<string, string> }>(request);

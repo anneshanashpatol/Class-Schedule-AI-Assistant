@@ -11,7 +11,7 @@ interface PreviewAction {
   label: string; risk: boolean; candidates?: Candidate[]; selected?: Candidate;
   result?: unknown; missing?: string[];
 }
-interface Preview { question?: string; reply?: string; proposalId?: string; expiresInMinutes?: number; actions: PreviewAction[] }
+interface Preview { question?: string; reply?: string; intentKind?: string; proposalId?: string; expiresInMinutes?: number; actions: PreviewAction[] }
 interface Settings { endpoint: string; model: string; hasApiKey: boolean; hasEncryptionKey: boolean }
 interface Result { status: string; results: { index: number; status: string; data?: unknown; error?: string }[]; remaining?: number; message?: string; explanation?: string }
 
@@ -47,6 +47,11 @@ function assistantSummary(preview: Preview): string {
   if (preview.proposalId) {
     if (preview.actions.some((item) => item.action.kind === 'schedule_delete')) return '我找到了可能要删除的课程。请核对下方的具体记录；你确认后才会删除。';
     if (preview.actions.some((item) => item.action.kind === 'schedule_create')) return '排课信息整理好了。请先看看日期、时间和上课人员是否正确。';
+    if (preview.actions.length === 1 && preview.actions[0].action.kind === 'schedule_completion') {
+      const count = preview.actions[0].candidates?.length ?? 0;
+      return count > 1 ? `我按你给的线索找到了 ${count} 节课，请在下方选择要调整的那一节，再确认。`
+        : '我找到了对应课程。请核对下方的日期、时间和人员，确认后再调整完课状态。';
+    }
     return '我整理好了操作内容。请核对下方预览，确认后才会执行。';
   }
   const entries = preview.actions.flatMap((item) => {
@@ -65,6 +70,7 @@ function App() {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState<{ role: 'user' | 'assistant'; text: string }[]>([]);
+  const [activeIntent, setActiveIntent] = useState<string | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState('');
@@ -83,8 +89,9 @@ function App() {
     const pendingActions = preview?.question ? preview.actions.slice(0, 3).map((item) => item.action) : [];
     setHistory((items) => [...items, { role: 'user', text: message }]);
     try {
-      const next = await api<Preview>('/interpret', { method: 'POST', body: JSON.stringify({ input: message, context, pendingActions }) });
+      const next = await api<Preview>('/interpret', { method: 'POST', body: JSON.stringify({ input: message, context, pendingActions, activeIntent }) });
       setPreview(next.actions.length ? next : null); setSelection({}); setApproval([]); setPasswords({});
+      setActiveIntent(next.intentKind ?? null);
       setHistory((items) => [...items, { role: 'assistant', text: assistantSummary(next) }]);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : '解析失败';
@@ -100,6 +107,7 @@ function App() {
     try {
       const response = await api<Result>('/confirm', { method: 'POST', body: JSON.stringify({ proposalId: preview.proposalId, selections: selection, approvals: approval, passwords }) });
       setResult(response);
+      setActiveIntent(null);
       const failed = response.results.find((item) => item.status === 'failed');
       const summary = response.status === 'DONE' ? `操作已完成，共成功 ${response.results.length} 项。`
         : failed ? `第 ${failed.index + 1} 项没有完成：${failed.error ?? '原因未知'}。之前成功 ${response.results.filter((item) => item.status === 'success').length} 项，后面还有 ${response.remaining ?? 0} 项未执行。${response.explanation ? `AI 补充：${response.explanation}` : '可以继续问我原因。'}`

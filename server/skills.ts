@@ -28,7 +28,7 @@ export const skills: Record<Kind, Skill> = {
     instruction: 'filters 定位待删除课程；只能单条删除，不生成多个删除 action。目标由真实 API 查询并在页面确认。',
     clarification: '请补充待删除课程的日期、时间、教师或学生姓名。' },
   schedule_completion: { name: '调整完课状态', roles: ['ADMIN', 'TEACHER'], readOnly: false,
-    instruction: 'filters 定位课程，completed 是布尔值；点完课为 true，撤销完课为 false。教师只能操作本人课程，原 API 限定可操作日期。',
+    instruction: 'filters 只需用户已给的姓名、日期、时段等线索即可查询真实课程，不要索要课程全部字段。姓名身份不明用 participantName 同时匹配教师和学生；相对日期换算成明确日期，上午/下午/晚上写 period。completed 是布尔值，设为已完课为 true，撤销完课为 false。唯一目标也要预览确认，多个目标交页面选择；教师只能操作本人课程，原 API 限定可操作日期。',
     clarification: '请说明要标记为已完课还是撤销完课，以及是哪天哪节课。' },
   user_search: { name: '查询用户', roles: managers, readOnly: true,
     instruction: 'filters 可用 username、role、status；不要把用户查询和课程查询混淆。',
@@ -75,7 +75,7 @@ export function skillPrompt(kind?: Kind): string {
 }
 
 const intentSignals: Partial<Record<Kind, RegExp>> = {
-  schedule_completion: /(?:点完课|标记.{0,3}完课|取消完课|撤销完课|完课状态)/,
+  schedule_completion: /(?:点完课|标记.{0,5}完课|设(?:置)?.{0,5}完课|改为.{0,3}完课|取消完课|撤销完课|完课状态)/,
   schedule_delete: /(?:删(?:掉|除)?.{0,8}(?:课程|这节课|的课)|删课)/,
   schedule_create: /(?:排课|安排.{0,8}(?:上课|课程|一节课)|新增课程)/,
   schedule_update: /(?:编辑课程|修改.{0,8}(?:课程|上课时间|教室|科目)|改.{0,8}(?:上课时间|教室|科目))的?/,
@@ -91,12 +91,14 @@ const intentSignals: Partial<Record<Kind, RegExp>> = {
   adjustments_search: /(?:课时调整记录|余额调整记录|调整记录)/,
 };
 
-export function detectIntent(input: string, pending: Action[] = []): { kind?: Kind; certain: boolean } {
-  if (/(?:怎么|如何|为什么|解释|介绍|什么是|有什么规则|会.{0,15}吗)/.test(input.trim())) return { certain: false };
-  if (/[，,；;]|然后|同时|顺便|再(?:帮|查|给|删|导|改|设|调)/.test(input)) return { certain: false };
+export function detectIntent(input: string, pending: Action[] = [], activeKind?: Kind): { kind?: Kind; certain: boolean } {
+  if (/^(?:算了|不用了|取消这个|停止|换个话题)/.test(input.trim())) return { certain: false };
+  if (/(?:怎么|如何|为什么|解释|介绍|什么是|有什么规则|会.{0,15}吗)/.test(input.trim())) return { kind: activeKind, certain: false };
+  if (/[，,；;]|然后|同时|顺便|再(?:帮|查|给|删|导|改|设|调)/.test(input)) return { kind: activeKind, certain: false };
   const matched = (Object.entries(intentSignals) as [Kind, RegExp][]).filter(([, pattern]) => pattern.test(input)).map(([kind]) => kind);
   if (matched.length === 1) return { kind: matched[0], certain: true };
   if (matched.length > 1) return { certain: false };
   const pendingKinds = [...new Set(pending.map((action) => action.kind))];
-  return pendingKinds.length === 1 ? { kind: pendingKinds[0], certain: false } : { certain: false };
+  return pendingKinds.length === 1 ? { kind: pendingKinds[0], certain: false }
+    : activeKind ? { kind: activeKind, certain: false } : { certain: false };
 }

@@ -117,7 +117,8 @@ export async function explainFailure(env: Env, kind: Action['kind'], error: stri
   return content.trim().slice(0, 300);
 }
 
-const modelOutput = z.object({ question: z.string().max(300).optional(), reply: z.string().max(1000).optional(), actions: z.array(actionSchema).max(20) });
+const modelOutput = z.object({ question: z.string().max(300).optional(), reply: z.string().max(1000).optional(),
+  intentKind: z.enum(Object.keys(skills) as [Action['kind'], ...Action['kind'][]]).optional(), actions: z.array(actionSchema).max(20) });
 export interface ConversationTurn { role: 'user' | 'assistant'; text: string }
 function omitNullFields(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(omitNullFields);
@@ -153,10 +154,14 @@ function normalizeModelOutput(value: unknown): unknown {
     return action;
   }) };
 }
-export async function parseInstruction(env: Env, input: string, context: ConversationTurn[], role: Role, pendingActions: Action[] = [], intentKind?: Action['kind']): Promise<{ question?: string; reply?: string; actions: Action[] }> {
+export async function parseInstruction(env: Env, input: string, context: ConversationTurn[], role: Role, pendingActions: Action[] = [], activeKind?: Action['kind']): Promise<{ question?: string; reply?: string; intentKind?: Action['kind']; actions: Action[] }> {
   const now = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short' }).format(new Date());
+  const today = now.slice(0, 10);
+  const tomorrow = new Date(`${today}T00:00:00Z`);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  const tomorrowDate = tomorrow.toISOString().slice(0, 10);
   const messages: { role: 'system' | 'user'; content: string }[] = [
-    { role: 'system', content: `${agentInstructions}\n当前账号是${role === 'ADMIN' ? '管理员' : role === 'TEACHER' ? '教师' : '学生'}。本轮${intentKind ? `优先使用 ${intentKind}（${skills[intentKind].name}）；若用户改变目的，以当前消息为准。` : '先判断目的，再选择对应能力。'}\n${skillPrompt(intentKind)}\n现在北京时间：${now}。将相对日期换算成明确日期。无权限时使用 reply 和空 actions。` },
+    { role: 'system', content: `${agentInstructions}\n当前账号是${role === 'ADMIN' ? '管理员' : role === 'TEACHER' ? '教师' : '学生'}。${activeKind ? `上轮目标是 ${activeKind}（${skills[activeKind].name}）；若当前消息只是补充，继续该目标，不重新要求已有线索。` : ''}你可以在全部能力中选择本轮需要的工具。若用户转到新目标，以新目标为准；若只是闲聊或致谢，自然回复且 actions 为空，不能重复执行操作。\n${skillPrompt()}\n现在北京时间：${now}。今天是 ${today}，明天是 ${tomorrowDate}。将相对日期换算成明确日期。无权限时使用 reply 和空 actions。` },
     { role: 'user', content: JSON.stringify({ recentConversation: context.slice(-8).map((turn) => ({ role: turn.role, text: turn.text.slice(0, 500) })), pendingActions: pendingActions.slice(0, 3), instruction: input.slice(0, 1000) }) },
   ];
   let content = await completion(env, messages, 4096, true);
@@ -167,11 +172,12 @@ export async function parseInstruction(env: Env, input: string, context: Convers
     catch { parsed = undefined; }
     lastParsed = parsed;
     const result = modelOutput.safeParse(normalizeModelOutput(omitNullFields(parsed)));
-    if (result.success) return { actions: result.data.actions, question: result.data.question?.trim() || undefined, reply: result.data.reply?.trim() || undefined };
+    if (result.success) return { actions: result.data.actions, question: result.data.question?.trim() || undefined, reply: result.data.reply?.trim() || undefined,
+      ...(result.data.intentKind ? { intentKind: result.data.intentKind } : {}) };
     if (attempt === 0) {
       const issues = result.error.issues.slice(0, 5).map((issue) => `${issue.path.join('.') || '顶层'}: ${issue.message}`);
       content = await completion(env, [
-        { role: 'system', content: `修正课程助手的 JSON 输出。只输出 JSON 对象，顶层为 actions 数组，可有 question 字符串。${skillPrompt(intentKind)}若目标或意图仍不清楚，返回 question 和空 actions，不猜课程 ID。` },
+        { role: 'system', content: `修正课程助手的 JSON 输出。只输出 JSON 对象，顶层为 actions 数组，可有 question 字符串。${skillPrompt()}若目标或意图仍不清楚，返回 question 和空 actions，不猜课程 ID。` },
         { role: 'user', content: JSON.stringify({ now, role, instruction: input.slice(0, 1000), previousOutput: content.slice(0, 2000), validationErrors: issues }) },
       ], 2048, true);
     }
@@ -179,5 +185,5 @@ export async function parseInstruction(env: Env, input: string, context: Convers
   const question = lastParsed && typeof lastParsed === 'object' && !Array.isArray(lastParsed) &&
     typeof (lastParsed as Record<string, unknown>).question === 'string'
     ? String((lastParsed as Record<string, unknown>).question).trim().slice(0, 300) : '';
-  return { actions: [], question: question || (intentKind ? skills[intentKind].clarification : '我还不能可靠地确定这项操作。请补充要处理的对象和关键信息。') };
+  return { actions: [], question: question || '我还不能可靠地确定这项操作。请补充要处理的对象和关键信息。', intentKind: activeKind };
 }

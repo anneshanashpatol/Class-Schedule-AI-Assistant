@@ -1,6 +1,6 @@
 import type { Action, Env, ResolvedAction, User } from './core';
 import { parseInstruction, type ConversationTurn } from './model';
-import { assertSkillRole, detectIntent, isReadOnly, skills } from './skills';
+import { assertSkillRole, detectIntent, isReadOnly, type Kind } from './skills';
 import { expandActions, resolveAction } from './workflow';
 
 export interface AgentPlan {
@@ -8,33 +8,29 @@ export interface AgentPlan {
   question?: string;
   actions: ResolvedAction[];
   hasWrites: boolean;
+  intentKind?: Kind;
 }
 
 export async function planAgentTurn(env: Env, request: Request, user: User, input: string,
-  context: ConversationTurn[], pendingActions: Action[]): Promise<AgentPlan> {
-  const intent = detectIntent(input, pendingActions);
-  if (intent.certain && intent.kind && !skills[intent.kind].roles.includes(user.role)) {
-    return { reply: `当前账号没有${skills[intent.kind].name}的权限。`, actions: [], hasWrites: false };
-  }
-
-  const parsed = await parseInstruction(env, input, context, user.role, pendingActions, intent.certain ? intent.kind : undefined);
+  context: ConversationTurn[], pendingActions: Action[], activeKind?: Kind): Promise<AgentPlan> {
+  if (/^(?:算了|不用了|停止|换个话题|别弄了|(?:取消|撤销)(?:刚才|之前|这个|那项|这项|操作|任务|计划))/.test(input.trim()))
+    return { reply: '好的，先不继续这项操作。', actions: [], hasWrites: false };
+  const parsed = await parseInstruction(env, input, context, user.role, pendingActions, activeKind);
+  const continuedKind = parsed.intentKind ?? activeKind ?? detectIntent(input, pendingActions).kind;
   if (!parsed.actions.length) return {
     reply: parsed.reply,
-    question: parsed.question ?? (intent.certain && intent.kind && !parsed.reply ? skills[intent.kind].clarification : undefined),
-    actions: [], hasWrites: false,
+    question: parsed.question,
+    actions: [], hasWrites: false, intentKind: continuedKind,
   };
-
-  if (intent.certain && intent.kind && parsed.actions.some((action) => action.kind !== intent.kind)) {
-    return { question: `我理解你想${skills[intent.kind].name}，但这句话也可能指其他操作。请确认你要做什么。`, actions: [], hasWrites: false };
-  }
 
   for (const action of parsed.actions) assertSkillRole(action.kind, user.role);
   const actions = expandActions(parsed.actions);
   const resolved = await Promise.all(actions.map((action) => resolveAction(env, request, user, action)));
   const missing = [...new Set(resolved.flatMap((item) => item.missing ?? []))];
   return {
-    question: missing.length ? parsed.question ?? `请补充：${missing.join('、')}` : undefined,
+    question: missing.length ? parsed.question ?? `请补充：${missing.join('、')}` : parsed.question,
     actions: resolved,
     hasWrites: resolved.some((item) => !isReadOnly(item.action.kind)),
+    intentKind: resolved.length === 1 ? resolved[0].action.kind : continuedKind,
   };
 }
