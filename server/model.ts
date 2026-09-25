@@ -60,16 +60,18 @@ export async function saveSettings(env: Env, body: unknown) {
 }
 export async function clearSettings(env: Env) { await env.AI_DB.prepare('DELETE FROM ai_settings WHERE id = 1').run(); }
 
-async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[]) {
+async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[], maxTokens = 4096) {
   const row = await getRow(env);
   if (!row) throw new ApiFailure(503, 'MODEL_NOT_CONFIGURED', '管理员尚未配置模型');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
+  let apiKey = '';
   try {
+    apiKey = await decrypt(env, row);
     const response = await fetch(row.endpoint, {
       method: 'POST', redirect: 'error', signal: controller.signal,
-      headers: { Authorization: `Bearer ${await decrypt(env, row)}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: row.model, messages, temperature: 0, max_tokens: 4096, stream: false }),
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: row.model, messages, temperature: 0, max_tokens: maxTokens, stream: false }),
     });
     if (!response.ok) throw new ApiFailure(502, 'MODEL_ERROR', `模型服务返回 ${response.status}，请检查配置或稍后重试`);
     if (!response.body) throw new ApiFailure(502, 'MODEL_FORMAT', '模型返回内容为空');
@@ -94,12 +96,19 @@ async function completion(env: Env, messages: { role: 'system' | 'user'; content
     return content;
   } catch (error) {
     if (error instanceof ApiFailure) throw error;
-    throw new ApiFailure(502, 'MODEL_UNAVAILABLE', '模型连接失败或超时');
+    if (controller.signal.aborted) throw new ApiFailure(504, 'MODEL_TIMEOUT', '模型在 45 秒内未响应，请稍后重试');
+    const detail = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+    console.error('Model API network failure', {
+      host: new URL(row.endpoint).hostname,
+      type: error instanceof Error ? error.name : typeof error,
+      detail: apiKey ? detail.replaceAll(apiKey, '[redacted]') : detail,
+    });
+    throw new ApiFailure(502, 'MODEL_NETWORK_ERROR', '无法连接模型接口，未收到服务商响应；请检查 Cloudflare Worker 日志');
   } finally { clearTimeout(timeout); }
 }
 
 export async function testModel(env: Env) {
-  const result = await completion(env, [{ role: 'user', content: '请只回复 OK' }]);
+  const result = await completion(env, [{ role: 'user', content: '请只回复 OK' }], 512);
   return { connected: Boolean(result.trim()) };
 }
 
