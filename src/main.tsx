@@ -86,7 +86,11 @@ function App() {
       const next = await api<Preview>('/interpret', { method: 'POST', body: JSON.stringify({ input: message, context, pendingActions }) });
       setPreview(next.actions.length ? next : null); setSelection({}); setApproval([]); setPasswords({});
       setHistory((items) => [...items, { role: 'assistant', text: assistantSummary(next) }]);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : '解析失败'); }
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : '解析失败';
+      setError(message);
+      setHistory((items) => [...items, { role: 'assistant', text: message }]);
+    }
     finally { setBusy(false); }
   }
 

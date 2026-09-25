@@ -75,6 +75,8 @@ export function expandActions(actions: Action[]): Action[] {
     } else expanded.push(action);
   }
   if (expanded.length > 20) throw new ApiFailure(422, 'TOO_MANY_ACTIONS', '一次最多处理 20 条操作');
+  if (expanded.filter((action) => action.kind === 'schedule_delete' || action.kind === 'user_delete').length > 1)
+    throw new ApiFailure(422, 'BULK_DELETE_UNSUPPORTED', '一次只能删除一条课程或一个用户，请分开操作');
   return expanded;
 }
 

@@ -1,6 +1,7 @@
 import { actionSchema, ApiFailure, assertOrigin, assertRole, currentUser, errorResponse, mainApi, type Env, type ResolvedAction, type Schedule } from './core';
-import { clearSettings, explainFailure, parseInstruction, publicSettings, saveSettings, testModel, type ConversationTurn } from './model';
-import { executeAction, expandActions, resolveAction } from './workflow';
+import { clearSettings, explainFailure, publicSettings, saveSettings, testModel, type ConversationTurn } from './model';
+import { executeAction } from './workflow';
+import { planAgentTurn } from './agent';
 
 type StoredProposal = { id: string; user_id: number; actions_json: string; status: string; next_index: number; results_json: string; expires_at: string };
 function json(data: unknown, status = 200) { return Response.json({ data }, { status, headers: { 'Cache-Control': 'no-store' } }); }
@@ -50,19 +51,14 @@ async function handler(request: Request, env: Env): Promise<Response> {
       .slice(-8).map((item) => ({ role: item.role, text: item.text.slice(0, 500) })) : [];
     const pendingActions = Array.isArray(body.pendingActions) ? body.pendingActions.slice(0, 3)
       .map((item) => actionSchema.safeParse(item)).filter((result) => result.success).map((result) => result.data) : [];
-    const parsed = await parseInstruction(env, body.input, context, user.role, pendingActions);
-    if (!parsed.actions.length) return json({ reply: parsed.reply, question: parsed.question, actions: [] });
-    const actions = expandActions(parsed.actions);
-    const resolved = await Promise.all(actions.map((action) => resolveAction(env, request, user, action)));
-    const missing = resolved.flatMap((item) => item.missing ?? []);
-    if (missing.length) return json({ question: parsed.question ?? `请补充：${[...new Set(missing)].join('、')}`, actions: resolved });
-    const hasWrites = resolved.some((item) => !['schedule_search','schedule_export','user_search','hours_balance','adjustments_search'].includes(item.action.kind));
-    if (!hasWrites) return json({ actions: resolved });
+    const plan = await planAgentTurn(env, request, user, body.input, context, pendingActions);
+    if (!plan.actions.length || plan.question) return json({ reply: plan.reply, question: plan.question, actions: plan.actions });
+    if (!plan.hasWrites) return json({ reply: plan.reply, actions: plan.actions });
     const id = crypto.randomUUID();
     await env.AI_DB.prepare("DELETE FROM proposals WHERE expires_at < datetime('now')").run();
     await env.AI_DB.prepare("INSERT INTO proposals (id, user_id, actions_json, status, expires_at) VALUES (?, ?, ?, 'PENDING', datetime('now', '+15 minutes'))")
-      .bind(id, user.id, JSON.stringify(resolved)).run();
-    return json({ proposalId: id, expiresInMinutes: 15, actions: resolved });
+      .bind(id, user.id, JSON.stringify(plan.actions)).run();
+    return json({ proposalId: id, expiresInMinutes: 15, actions: plan.actions });
   }
   if (path === '/confirm' && request.method === 'POST') {
     const body = await parseBody<{ proposalId?: string; selections?: Record<string, number>; approvals?: number[]; passwords?: Record<string, string> }>(request);
