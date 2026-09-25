@@ -30,8 +30,11 @@ test('连接测试只请求少量输出 token', async () => {
   const originalFetch = globalThis.fetch;
   let requestedTokens = 0;
   let redirectMode = '';
+  let responseFormat: unknown;
   globalThis.fetch = async (_input, init) => {
-    requestedTokens = JSON.parse(String(init?.body)).max_tokens;
+    const body = JSON.parse(String(init?.body));
+    requestedTokens = body.max_tokens;
+    responseFormat = body.response_format;
     redirectMode = init?.redirect ?? '';
     return Response.json({ choices: [{ message: { content: 'OK' } }] });
   };
@@ -39,6 +42,7 @@ test('连接测试只请求少量输出 token', async () => {
     assert.deepEqual(await testModel(await configuredEnv()), { connected: true });
     assert.ok(requestedTokens <= 512);
     assert.equal(redirectMode, 'manual');
+    assert.equal(responseFormat, undefined);
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -57,14 +61,23 @@ test('模型接口重定向时拒绝转发密钥', async () => {
 
 test('模型把可省略字段返回为 null 时仍能解析排课', async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify({
+  let sentPrompt = '';
+  let responseFormat: unknown;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    sentPrompt = body.messages[0].content;
+    responseFormat = body.response_format;
+    return Response.json({ choices: [{ message: { content: `\n\`\`\`json\n${JSON.stringify({
     question: '', actions: [{ kind: 'schedule_create', fields: {
       teacherName: '丁茗辉', studentNames: ['王康凯'], subject: '数学', classDate: '2026-09-27', startTime: '10:00', endTime: '12:00', classroom: null,
     }, repeatWeeks: null }],
-  }) } }] });
+    })}\n\`\`\`\n` } }] });
+  };
   try {
-    const result = await parseInstruction(await configuredEnv(), '27号排课', []);
+    const result = await parseInstruction(await configuredEnv(), '27号排课', [], 'ADMIN');
     assert.equal(result.question, undefined);
+    assert.match(sentPrompt, /当前账号是管理员/);
+    assert.deepEqual(responseFormat, { type: 'json_object' });
     assert.deepEqual(result.actions, [{ kind: 'schedule_create', fields: {
       teacherName: '丁茗辉', studentNames: ['王康凯'], subject: '数学', classDate: '2026-09-27', startTime: '10:00', endTime: '12:00',
     } }]);

@@ -44,7 +44,7 @@ async function handler(request: Request, env: Env): Promise<Response> {
       WHERE model_call_cooldowns.next_allowed_at <= ?`).bind(user.id, now + 3, now).run();
     if ((throttle.meta.changes ?? 0) === 0) throw new ApiFailure(429, 'TOO_MANY_REQUESTS', '发送太快，请稍等几秒再试');
     const context = Array.isArray(body.context) ? body.context.filter((item): item is string => typeof item === 'string').slice(-4) : [];
-    const parsed = await parseInstruction(env, body.input, context);
+    const parsed = await parseInstruction(env, body.input, context, user.role);
     if (!parsed.actions.length) return json({ question: parsed.question ?? '请补充要查询或操作的内容', actions: [] });
     const actions = expandActions(parsed.actions);
     const resolved = await Promise.all(actions.map((action) => resolveAction(env, request, user, action)));

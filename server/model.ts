@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { actionSchema, ApiFailure, type Action, type Env } from './core';
+import { actionSchema, ApiFailure, type Action, type Env, type Role } from './core';
 
 interface SettingRow { endpoint: string; model: string; key_ciphertext: string; key_iv: string }
 const settingsInput = z.object({ endpoint: z.string().max(500), model: z.string().trim().min(1).max(150), apiKey: z.string().max(500).optional() });
@@ -60,7 +60,7 @@ export async function saveSettings(env: Env, body: unknown) {
 }
 export async function clearSettings(env: Env) { await env.AI_DB.prepare('DELETE FROM ai_settings WHERE id = 1').run(); }
 
-async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[], maxTokens = 4096) {
+async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[], maxTokens = 4096, jsonMode = false) {
   const row = await getRow(env);
   if (!row) throw new ApiFailure(503, 'MODEL_NOT_CONFIGURED', '管理员尚未配置模型');
   const controller = new AbortController();
@@ -70,7 +70,8 @@ async function completion(env: Env, messages: { role: 'system' | 'user'; content
     const response = await fetch(row.endpoint, {
       method: 'POST', redirect: 'manual', signal: controller.signal,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: row.model, messages, temperature: 0, max_tokens: maxTokens, stream: false }),
+      body: JSON.stringify({ model: row.model, messages, temperature: 0, max_tokens: maxTokens, stream: false,
+        ...(jsonMode && new URL(row.endpoint).hostname.endsWith('.siliconflow.cn') ? { response_format: { type: 'json_object' } } : {}) }),
     });
     if (response.status >= 300 && response.status < 400) throw new ApiFailure(502, 'MODEL_REDIRECT', '模型接口返回重定向；为保护 API Key，已拒绝跟随，请填写最终 HTTPS 地址');
     if (!response.ok) throw new ApiFailure(502, 'MODEL_ERROR', `模型服务返回 ${response.status}，请检查配置或稍后重试`);
@@ -115,19 +116,24 @@ function omitNullFields(value: unknown): unknown {
   }
   return value;
 }
-const systemPrompt = `你是中文排课管理指令解析器。只输出 JSON 对象，不要 Markdown。格式 {"question":"信息不足时的简短追问，可省略","actions":[...]}。
+const systemPrompt = `你是中文排课管理指令解析器。只输出 JSON 对象，不要 Markdown。顶层必须有 actions 数组；仅在确实缺少信息时添加 question 字符串，写出具体缺少什么。信息充足时不要输出 question。
 允许 kind：schedule_search(filters), schedule_export(filters), schedule_create(fields,repeatWeeks?), schedule_update(filters,fields), schedule_delete(filters), schedule_completion(filters,completed), user_search(filters), hours_balance(filters), user_create(fields), user_update(filters,fields), user_status(filters,status), user_delete(filters), hours_adjust(filters,amountHundredths,note), adjustments_search(filters)。
 查询“剩余课时”“课时余额”“还有多少课时”必须使用 hours_balance；当前学生查自己余额时 filters 用空对象；管理员查指定学生时 filters.username 填姓名，查全部学生时 filters 用空对象。查询余额不是调整余额，不能用 hours_adjust。
 课程 filters 可用 id,teacherName,studentName,dateFrom,dateTo,subject,classroom,completed("true"/"false")；用户 filters 可用 id,username,role,status。课程 fields 使用 teacherName、studentNames(姓名数组)、subject、classDate、startTime、endTime、classroom；用户 fields 使用 username、role(ADMIN/TEACHER/STUDENT)、subject、school、grade。新增课程必须有教师、学生、科目、日期和起止时间；新增用户必须有姓名及身份，密码由页面收集。不要猜测数据库 ID。日期用 YYYY-MM-DD，时间用 HH:mm。缺少必填信息请写 question，不要猜结束时间、密码、用户身份或目标。重复排课用 repeatWeeks（包含首周，最多20），不要自行列出20条。调整余额单位为百分之一课时，必须有原因。不要生成密码操作。单次最多20项。`;
-export async function parseInstruction(env: Env, input: string, context: string[]): Promise<{ question?: string; actions: Action[] }> {
+const roleInstructions: Record<Role, string> = {
+  ADMIN: '当前账号是管理员，可使用上述全部操作。',
+  TEACHER: '当前账号是教师，只能查询或导出本人可见课程，以及修改本人课程的完课状态。',
+  STUDENT: '当前账号是学生，只能查询或导出本人可见课程，以及查询自己的剩余课时；查询本人课时余额时 filters 用空对象。',
+};
+export async function parseInstruction(env: Env, input: string, context: string[], role: Role): Promise<{ question?: string; actions: Action[] }> {
   const now = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short' }).format(new Date());
   const content = await completion(env, [
-    { role: 'system', content: `${systemPrompt}\n现在北京时间：${now}。将相对日期换算成明确日期。` },
+    { role: 'system', content: `${systemPrompt}\n${roleInstructions[role]}不允许的操作返回简短的无权限说明及空 actions。现在北京时间：${now}。将相对日期换算成明确日期。` },
     { role: 'user', content: JSON.stringify({ recentContext: context.slice(-4).map((text) => text.slice(0, 300)), instruction: input.slice(0, 1000) }) },
-  ]);
+  ], 4096, true);
   let parsed: unknown;
-  try { parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, '')); }
-  catch { throw new ApiFailure(502, 'MODEL_FORMAT', '模型返回格式不正确，请换一种说法重试'); }
+  try { parsed = JSON.parse(content.trim().replace(/^```(?:json)?\s*|\s*```$/gi, '').trim()); }
+  catch { throw new ApiFailure(502, 'MODEL_FORMAT', '模型没有返回有效 JSON，已拦截；请重试'); }
   const result = modelOutput.safeParse(omitNullFields(parsed));
   if (!result.success) throw new ApiFailure(502, 'MODEL_FORMAT', '模型返回的操作不符合约定，已拦截；请重试');
   return { actions: result.data.actions, question: result.data.question?.trim() || undefined };
