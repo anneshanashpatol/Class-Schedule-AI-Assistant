@@ -181,3 +181,15 @@ test('模型两次输出不合约定时转为追问，不返回格式错误', as
     assert.match(parsed.question ?? '', /补充/);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test('模型给出冲突日期时不会静默选一个日期执行', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify({ actions: [{
+    kind: 'schedule_completion', filters: { classDate: '2026-09-25', dateFrom: '2026-09-26', participantName: '包梦妍' }, completed: true,
+  }] }) } }] });
+  try {
+    const parsed = await parseInstruction(await configuredEnv(), '把包梦妍的课点完课', [], 'ADMIN');
+    assert.deepEqual(parsed.actions, []);
+    assert.ok(parsed.question);
+  } finally { globalThis.fetch = originalFetch; }
+});

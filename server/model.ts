@@ -138,6 +138,7 @@ function normalizeModelOutput(value: unknown): unknown {
     if (action.filters && typeof action.filters === 'object' && !Array.isArray(action.filters)) {
       const filters = { ...action.filters } as Record<string, unknown>;
       if (typeof filters.classDate === 'string') {
+        if ((filters.dateFrom && filters.dateFrom !== filters.classDate) || (filters.dateTo && filters.dateTo !== filters.classDate)) return raw;
         filters.dateFrom ??= filters.classDate;
         filters.dateTo ??= filters.classDate;
         delete filters.classDate;
