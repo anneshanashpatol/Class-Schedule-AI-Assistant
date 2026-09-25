@@ -60,7 +60,7 @@ export async function saveSettings(env: Env, body: unknown) {
 }
 export async function clearSettings(env: Env) { await env.AI_DB.prepare('DELETE FROM ai_settings WHERE id = 1').run(); }
 
-async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[], maxTokens = 4096) {
+async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[], maxTokens = 4096, diagnostics = false) {
   const row = await getRow(env);
   if (!row) throw new ApiFailure(503, 'MODEL_NOT_CONFIGURED', '管理员尚未配置模型');
   const controller = new AbortController();
@@ -97,18 +97,22 @@ async function completion(env: Env, messages: { role: 'system' | 'user'; content
   } catch (error) {
     if (error instanceof ApiFailure) throw error;
     if (controller.signal.aborted) throw new ApiFailure(504, 'MODEL_TIMEOUT', '模型在 45 秒内未响应，请稍后重试');
-    const detail = (error instanceof Error ? error.message : String(error)).slice(0, 300);
+    const type = error instanceof Error ? error.name : typeof error;
+    const rawDetail = error instanceof Error ? error.message : String(error);
+    const detail = (apiKey ? rawDetail.replaceAll(apiKey, '[redacted]') : rawDetail).replace(/[\r\n]+/g, ' ').slice(0, 200);
     console.error('Model API network failure', {
       host: new URL(row.endpoint).hostname,
-      type: error instanceof Error ? error.name : typeof error,
-      detail: apiKey ? detail.replaceAll(apiKey, '[redacted]') : detail,
+      type,
+      detail,
     });
-    throw new ApiFailure(502, 'MODEL_NETWORK_ERROR', '无法连接模型接口，未收到服务商响应；请检查 Cloudflare Worker 日志');
+    throw new ApiFailure(502, 'MODEL_NETWORK_ERROR', diagnostics
+      ? `无法连接模型接口，未收到服务商响应（${type}: ${detail}）`
+      : '无法连接模型接口，未收到服务商响应；请联系管理员');
   } finally { clearTimeout(timeout); }
 }
 
 export async function testModel(env: Env) {
-  const result = await completion(env, [{ role: 'user', content: '请只回复 OK' }], 512);
+  const result = await completion(env, [{ role: 'user', content: '请只回复 OK' }], 512, true);
   return { connected: Boolean(result.trim()) };
 }
 

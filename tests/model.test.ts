@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { testModel } from '../server/model';
+import { parseInstruction, testModel } from '../server/model';
 import { ApiFailure, type Env } from '../server/core';
 
 async function configuredEnv(): Promise<Env> {
@@ -25,11 +25,26 @@ test('立即发生的模型网络错误不会被显示为超时', async () => {
       assert.equal(error.code, 'MODEL_NETWORK_ERROR');
       assert.match(error.message, /无法连接/);
       assert.doesNotMatch(error.message, /超时/);
+      assert.match(error.message, /fetch failed/);
+      assert.doesNotMatch(error.message, /test-key/);
       return true;
     });
     assert.match(logged, /fetch failed/);
     assert.doesNotMatch(logged, /test-key/);
   } finally { globalThis.fetch = originalFetch; console.error = originalConsoleError; }
+});
+
+test('普通用户解析失败时不显示底层网络异常', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new TypeError('private network detail'); };
+  try {
+    await assert.rejects(parseInstruction(await configuredEnv(), '查课', []), (error: unknown) => {
+      assert.ok(error instanceof ApiFailure);
+      assert.equal(error.code, 'MODEL_NETWORK_ERROR');
+      assert.doesNotMatch(error.message, /private network detail/);
+      return true;
+    });
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test('连接测试只请求少量输出 token', async () => {
