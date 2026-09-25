@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { testModel } from '../server/model';
+import { parseInstruction, testModel } from '../server/model';
 import { ApiFailure, type Env } from '../server/core';
 
 async function configuredEnv(): Promise<Env> {
@@ -52,5 +52,21 @@ test('模型接口重定向时拒绝转发密钥', async () => {
       assert.match(error.message, /重定向/);
       return true;
     });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('模型把可省略字段返回为 null 时仍能解析排课', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify({
+    question: '', actions: [{ kind: 'schedule_create', fields: {
+      teacherName: '丁茗辉', studentNames: ['王康凯'], subject: '数学', classDate: '2026-09-27', startTime: '10:00', endTime: '12:00', classroom: null,
+    }, repeatWeeks: null }],
+  }) } }] });
+  try {
+    const result = await parseInstruction(await configuredEnv(), '27号排课', []);
+    assert.equal(result.question, undefined);
+    assert.deepEqual(result.actions, [{ kind: 'schedule_create', fields: {
+      teacherName: '丁茗辉', studentNames: ['王康凯'], subject: '数学', classDate: '2026-09-27', startTime: '10:00', endTime: '12:00',
+    } }]);
   } finally { globalThis.fetch = originalFetch; }
 });

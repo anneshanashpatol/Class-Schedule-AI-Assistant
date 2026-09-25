@@ -107,6 +107,14 @@ export async function testModel(env: Env) {
 }
 
 const modelOutput = z.object({ question: z.string().max(300).optional(), actions: z.array(actionSchema).max(20) });
+function omitNullFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(omitNullFields);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== null)
+      .map(([key, field]) => [key, omitNullFields(field)]));
+  }
+  return value;
+}
 const systemPrompt = `你是中文排课管理指令解析器。只输出 JSON 对象，不要 Markdown。格式 {"question":"信息不足时的简短追问，可省略","actions":[...]}。
 允许 kind：schedule_search(filters), schedule_export(filters), schedule_create(fields,repeatWeeks?), schedule_update(filters,fields), schedule_delete(filters), schedule_completion(filters,completed), user_search(filters), hours_balance(filters), user_create(fields), user_update(filters,fields), user_status(filters,status), user_delete(filters), hours_adjust(filters,amountHundredths,note), adjustments_search(filters)。
 查询“剩余课时”“课时余额”“还有多少课时”必须使用 hours_balance；当前学生查自己余额时 filters 用空对象；管理员查指定学生时 filters.username 填姓名，查全部学生时 filters 用空对象。查询余额不是调整余额，不能用 hours_adjust。
@@ -120,7 +128,7 @@ export async function parseInstruction(env: Env, input: string, context: string[
   let parsed: unknown;
   try { parsed = JSON.parse(content.replace(/^```(?:json)?\s*|\s*```$/g, '')); }
   catch { throw new ApiFailure(502, 'MODEL_FORMAT', '模型返回格式不正确，请换一种说法重试'); }
-  const result = modelOutput.safeParse(parsed);
-  if (!result.success) throw new ApiFailure(502, 'MODEL_FORMAT', '模型返回的操作不符合约定，请换一种说法重试');
-  return result.data;
+  const result = modelOutput.safeParse(omitNullFields(parsed));
+  if (!result.success) throw new ApiFailure(502, 'MODEL_FORMAT', '模型返回的操作不符合约定，已拦截；请重试');
+  return { actions: result.data.actions, question: result.data.question?.trim() || undefined };
 }
