@@ -34,6 +34,25 @@ test('教师不可通过助手绕过原 API 的删课权限', async () => {
   await assert.rejects(() => resolveAction(fakeEnv(() => ok([])), request, { ...user, role: 'TEACHER' }, { kind: 'schedule_delete', filters: { teacherName: '张老师' } }), (error) => error instanceof ApiFailure && error.status === 403);
 });
 
+test('按课程起止时间筛选删除目标，时间不传给原站不支持的查询接口', async () => {
+  const lessons: Schedule[] = [
+    { id: 1, teacher_name: '丁茗辉', student_names: ['王康凯'], subject: '数学', class_date: '2026-09-27', start_time: '10:00', end_time: '12:00', classroom: '', is_completed: 0, version: 1 },
+    { id: 2, teacher_name: '丁茗辉', student_names: ['王康凯'], subject: '数学', class_date: '2026-09-27', start_time: '13:00', end_time: '15:00', classroom: '', is_completed: 0, version: 1 },
+  ];
+  const env = fakeEnv((forwarded) => {
+    const url = new URL(forwarded.url);
+    assert.equal(url.searchParams.get('startTime'), null);
+    assert.equal(url.searchParams.get('endTime'), null);
+    assert.equal(url.searchParams.get('dateFrom'), '2026-09-27');
+    assert.equal(url.searchParams.get('dateTo'), '2026-09-27');
+    return ok(lessons);
+  });
+  const result = await resolveAction(env, request, user, { kind: 'schedule_delete', filters: { teacherName: '丁茗辉', studentName: '王康凯', dateFrom: '2026-09-27', dateTo: '2026-09-27', startTime: '10:00', endTime: '12:00' } });
+  assert.equal(result.selected?.id, 1);
+  assert.deepEqual(result.candidates?.map((item) => item.id), [1]);
+  assert.equal(result.risk, true);
+});
+
 test('学生通过原站登录信息查询自己的剩余课时', async () => {
   const env = fakeEnv((forwarded) => {
     assert.equal(new URL(forwarded.url).pathname, '/api/auth/me');

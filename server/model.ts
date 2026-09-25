@@ -107,7 +107,8 @@ export async function testModel(env: Env) {
   return { connected: Boolean(result.trim()) };
 }
 
-const modelOutput = z.object({ question: z.string().max(300).optional(), actions: z.array(actionSchema).max(20) });
+const modelOutput = z.object({ question: z.string().max(300).optional(), reply: z.string().max(1000).optional(), actions: z.array(actionSchema).max(20) });
+export interface ConversationTurn { role: 'user' | 'assistant'; text: string }
 function omitNullFields(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(omitNullFields);
   if (value && typeof value === 'object') {
@@ -116,25 +117,36 @@ function omitNullFields(value: unknown): unknown {
   }
   return value;
 }
-const systemPrompt = `你是中文排课管理指令解析器。只输出 JSON 对象，不要 Markdown。顶层必须有 actions 数组；仅在确实缺少信息时添加 question 字符串，写出具体缺少什么。信息充足时不要输出 question。
+const systemPrompt = `你是中文课程管理助手。像正常助手一样用自然、简洁的中文交流，但输出必须是 JSON 对象，不要 Markdown。顶层必须有 actions 数组。课程相关的一般问答、解释或文案协助，使用 reply 字符串和空 actions；仅在确实缺少操作信息时添加 question 字符串，具体询问缺少什么。信息充足时不要输出 question。如果上一轮有待补齐操作，当前消息是补充信息时，把新信息与待补齐操作合成完整 action；如果用户取消或改变目标，以当前消息为准。可以根据最近对话中已显示的系统错误解释失败原因，但不能声称失败项已经执行。reply 不得编造当前课程、用户、余额或执行结果；涉及真实数据的查询必须生成查询 action，涉及写入必须生成操作 action，执行前由系统展示预览并取得确认。仅处理课程相关话题。
 允许 kind：schedule_search(filters), schedule_export(filters), schedule_create(fields,repeatWeeks?), schedule_update(filters,fields), schedule_delete(filters), schedule_completion(filters,completed), user_search(filters), hours_balance(filters), user_create(fields), user_update(filters,fields), user_status(filters,status), user_delete(filters), hours_adjust(filters,amountHundredths,note), adjustments_search(filters)。
 查询“剩余课时”“课时余额”“还有多少课时”必须使用 hours_balance；当前学生查自己余额时 filters 用空对象；管理员查指定学生时 filters.username 填姓名，查全部学生时 filters 用空对象。查询余额不是调整余额，不能用 hours_adjust。
-课程 filters 可用 id,teacherName,studentName,dateFrom,dateTo,subject,classroom,completed("true"/"false")；用户 filters 可用 id,username,role,status。课程 fields 使用 teacherName、studentNames(姓名数组)、subject、classDate、startTime、endTime、classroom；用户 fields 使用 username、role(ADMIN/TEACHER/STUDENT)、subject、school、grade。新增课程必须有教师、学生、科目、日期和起止时间；新增用户必须有姓名及身份，密码由页面收集。不要猜测数据库 ID。日期用 YYYY-MM-DD，时间用 HH:mm。缺少必填信息请写 question，不要猜结束时间、密码、用户身份或目标。重复排课用 repeatWeeks（包含首周，最多20），不要自行列出20条。调整余额单位为百分之一课时，必须有原因。不要生成密码操作。单次最多20项。`;
+课程 filters 可用 id,teacherName,studentName,dateFrom,dateTo,startTime,endTime,subject,classroom,completed("true"/"false")；用户 filters 可用 id,username,role,status。删除或编辑指定日期的课程时，同时设置 dateFrom 和 dateTo 为该日期；指定时段时设置 startTime 和 endTime，不能把 classDate 或 studentNames 放进 filters。删除课程必须用 kind=schedule_delete 和 filters，不要用 fields。课程 fields 使用 teacherName、studentNames(姓名数组)、subject、classDate、startTime、endTime、classroom；用户 fields 使用 username、role(ADMIN/TEACHER/STUDENT)、subject、school、grade。新增课程必须有教师、学生、科目、日期和起止时间；新增用户必须有姓名及身份，密码由页面收集。不要猜测数据库 ID。日期用 YYYY-MM-DD，时间用 HH:mm。缺少必填信息请写 question，不要猜结束时间、密码、用户身份或目标。重复排课用 repeatWeeks（包含首周，最多20），不要自行列出20条。调整余额单位为百分之一课时，必须有原因。不要生成密码操作。单次最多20项。`;
 const roleInstructions: Record<Role, string> = {
   ADMIN: '当前账号是管理员，可使用上述全部操作。',
   TEACHER: '当前账号是教师，只能查询或导出本人可见课程，以及修改本人课程的完课状态。',
   STUDENT: '当前账号是学生，只能查询或导出本人可见课程，以及查询自己的剩余课时；查询本人课时余额时 filters 用空对象。',
 };
-export async function parseInstruction(env: Env, input: string, context: string[], role: Role): Promise<{ question?: string; actions: Action[] }> {
+export async function parseInstruction(env: Env, input: string, context: ConversationTurn[], role: Role, pendingActions: Action[] = []): Promise<{ question?: string; reply?: string; actions: Action[] }> {
   const now = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short' }).format(new Date());
-  const content = await completion(env, [
-    { role: 'system', content: `${systemPrompt}\n${roleInstructions[role]}不允许的操作返回简短的无权限说明及空 actions。现在北京时间：${now}。将相对日期换算成明确日期。` },
-    { role: 'user', content: JSON.stringify({ recentContext: context.slice(-4).map((text) => text.slice(0, 300)), instruction: input.slice(0, 1000) }) },
-  ], 4096, true);
-  let parsed: unknown;
-  try { parsed = JSON.parse(content.trim().replace(/^```(?:json)?\s*|\s*```$/gi, '').trim()); }
-  catch { throw new ApiFailure(502, 'MODEL_FORMAT', '模型没有返回有效 JSON，已拦截；请重试'); }
-  const result = modelOutput.safeParse(omitNullFields(parsed));
-  if (!result.success) throw new ApiFailure(502, 'MODEL_FORMAT', '模型返回的操作不符合约定，已拦截；请重试');
-  return { actions: result.data.actions, question: result.data.question?.trim() || undefined };
+  const messages: { role: 'system' | 'user'; content: string }[] = [
+    { role: 'system', content: `${systemPrompt}\n${roleInstructions[role]}不允许的操作用 reply 简短说明并返回空 actions。现在北京时间：${now}。将相对日期换算成明确日期。` },
+    { role: 'user', content: JSON.stringify({ recentConversation: context.slice(-8).map((turn) => ({ role: turn.role, text: turn.text.slice(0, 500) })), pendingActions: pendingActions.slice(0, 3), instruction: input.slice(0, 1000) }) },
+  ];
+  let content = await completion(env, messages, 4096, true);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(content.trim().replace(/^```(?:json)?\s*|\s*```$/gi, '').trim()); }
+    catch { parsed = undefined; }
+    const result = modelOutput.safeParse(omitNullFields(parsed));
+    if (result.success) return { actions: result.data.actions, question: result.data.question?.trim() || undefined, reply: result.data.reply?.trim() || undefined };
+    if (attempt === 0) {
+      const issues = result.error.issues.slice(0, 5).map((issue) => `${issue.path.join('.') || '顶层'}: ${issue.message}`);
+      content = await completion(env, [
+        ...messages,
+        { role: 'user', content: JSON.stringify({ instruction: input.slice(0, 1000), previousOutput: content.slice(0, 3000), validationErrors: issues,
+          correction: '上一条输出不符合操作结构。仅返回修正后的 JSON 对象，不新增用户未要求的操作，不猜测课程编号。' }) },
+      ], 2048, true);
+    }
+  }
+  throw new ApiFailure(502, 'MODEL_FORMAT', '模型返回的操作不符合约定，已拦截；请重试');
 }

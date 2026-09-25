@@ -11,7 +11,7 @@ interface PreviewAction {
   label: string; risk: boolean; candidates?: Candidate[]; selected?: Candidate;
   result?: unknown; missing?: string[];
 }
-interface Preview { question?: string; proposalId?: string; expiresInMinutes?: number; actions: PreviewAction[] }
+interface Preview { question?: string; reply?: string; proposalId?: string; expiresInMinutes?: number; actions: PreviewAction[] }
 interface Settings { endpoint: string; model: string; hasApiKey: boolean; hasEncryptionKey: boolean }
 interface Result { status: string; results: { index: number; status: string; data?: unknown; error?: string }[]; remaining?: number; message?: string }
 
@@ -41,6 +41,22 @@ function formatResultEntry(value: unknown): string {
   const captions: Record<string, string> = { id: '编号', username: '姓名', display_name: '姓名', role: '身份', status: '状态', subject: '科目', school: '学校', grade: '年级' };
   return Object.entries(row).filter(([key]) => key in captions).map(([key, field]) => `${captions[key]}：${field}`).join('，') || '已获取记录';
 }
+function assistantSummary(preview: Preview): string {
+  if (preview.question) return preview.question;
+  if (!preview.actions.length) return preview.reply || '可以继续告诉我你想了解的课程问题。';
+  if (preview.proposalId) {
+    if (preview.actions.some((item) => item.action.kind === 'schedule_delete')) return '我找到了可能要删除的课程。请核对下方的具体记录；你确认后才会删除。';
+    if (preview.actions.some((item) => item.action.kind === 'schedule_create')) return '排课信息整理好了。请先看看日期、时间和上课人员是否正确。';
+    return '我整理好了操作内容。请核对下方预览，确认后才会执行。';
+  }
+  const entries = preview.actions.flatMap((item) => {
+    if (Array.isArray(item.result)) return item.result.slice(0, 5).map(formatResultEntry);
+    return item.result === undefined ? [] : [formatResultEntry(item.result)];
+  }).filter(Boolean);
+  if (entries.length) return `查到了：${entries.join('；')}${entries.length >= 5 ? '。更多结果见下方' : ''}`.slice(0, 800);
+  if (preview.actions.every((item) => Array.isArray(item.result) && item.result.length === 0)) return '暂时没有找到符合条件的记录。可以换个日期或名字再试。';
+  return preview.reply || '查询完成，结果见下方。';
+}
 
 function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -63,12 +79,13 @@ function App() {
     if (!input.trim() || busy) return;
     const message = input.trim();
     setInput(''); setBusy(true); setError(''); setPreview(null); setResult(null);
-    const context = history.filter((item) => item.role === 'user').slice(-4).map((item) => item.text);
+    const context = history.slice(-8).map((item) => ({ role: item.role, text: item.text.slice(0, 500) }));
+    const pendingActions = preview?.question ? preview.actions.slice(0, 3).map((item) => item.action) : [];
     setHistory((items) => [...items, { role: 'user', text: message }]);
     try {
-      const next = await api<Preview>('/interpret', { method: 'POST', body: JSON.stringify({ input: message, context }) });
-      setPreview(next); setSelection({}); setApproval([]); setPasswords({});
-      setHistory((items) => [...items, { role: 'assistant', text: next.question ?? (next.proposalId ? '请核对下面的操作预览，再确认执行。' : '查询完成，结果如下。') }]);
+      const next = await api<Preview>('/interpret', { method: 'POST', body: JSON.stringify({ input: message, context, pendingActions }) });
+      setPreview(next.actions.length ? next : null); setSelection({}); setApproval([]); setPasswords({});
+      setHistory((items) => [...items, { role: 'assistant', text: assistantSummary(next) }]);
     } catch (reason) { setError(reason instanceof Error ? reason.message : '解析失败'); }
     finally { setBusy(false); }
   }
@@ -79,8 +96,16 @@ function App() {
     try {
       const response = await api<Result>('/confirm', { method: 'POST', body: JSON.stringify({ proposalId: preview.proposalId, selections: selection, approvals: approval, passwords }) });
       setResult(response);
-      setHistory((items) => [...items, { role: 'assistant', text: response.status === 'DONE' ? '操作已完成。' : '部分操作未完成，请查看每项结果。' }]);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : '执行失败'); }
+      const failed = response.results.find((item) => item.status === 'failed');
+      const summary = response.status === 'DONE' ? `操作已完成，共成功 ${response.results.length} 项。`
+        : failed ? `第 ${failed.index + 1} 项没有完成：${failed.error ?? '原因未知'}。之前成功 ${response.results.filter((item) => item.status === 'success').length} 项，后面还有 ${response.remaining ?? 0} 项未执行。你可以继续问我原因。`
+          : response.message ?? '操作状态还在核实中，请不要重复提交。';
+      setHistory((items) => [...items, { role: 'assistant', text: summary }]);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : '执行失败';
+      setError(message);
+      setHistory((items) => [...items, { role: 'assistant', text: `这次没能确认执行结果：${message}。请先到原课程表核对，避免重复操作。` }]);
+    }
     finally { setBusy(false); }
   }
 
@@ -90,10 +115,10 @@ function App() {
       const rows: Record<string, unknown>[] = [];
       for (let offset = 0; offset < 10000; offset += 500) {
         const params = new URLSearchParams();
-        Object.entries(filters).forEach(([key, value]) => { if (value !== undefined && value !== '') params.set(key, String(value)); });
+        Object.entries(filters).forEach(([key, value]) => { if (key !== 'startTime' && key !== 'endTime' && value !== undefined && value !== '') params.set(key, String(value)); });
         params.set('offset', String(offset)); params.set('limit', '500');
         const batch = await api<Record<string, unknown>[]>(`/export-data?${params}`);
-        rows.push(...batch);
+        rows.push(...batch.filter((row) => (!filters.startTime || row.start_time === filters.startTime) && (!filters.endTime || row.end_time === filters.endTime)));
         if (batch.length < 500) break;
         if (offset === 9500) throw new Error('匹配课程超过 10000 条，请缩小导出范围');
       }
@@ -119,7 +144,7 @@ function App() {
   return <div className="app">
     <header className="topbar"><a className="back" href="/calendar"><ArrowLeft size={18} />返回课程表</a><div className="brand"><span className="brand-mark">π</span><span>前程π <b>AI 助手</b></span></div><div className="top-actions"><span className="identity">{user.displayName} · {user.role === 'ADMIN' ? '管理员' : user.role === 'TEACHER' ? '教师' : '学生'}</span>{user.role === 'ADMIN' && <button className="icon-button" title="模型设置" aria-label="模型设置" onClick={() => setSettingsOpen(true)}><Settings2 size={20} /></button>}</div></header>
     <div className="workspace"><aside className="intro"><div className="eyebrow"><Sparkles size={16} /> 自然语言工作台</div><h1>用一句话<br />安排接下来的课程。</h1><p>描述你想查询或操作的课程、用户。助手会先核对信息，再给你确认。</p><div className="intro-note"><ShieldAlert size={18} /><span>删除、停用、课时调整和排课时间重叠会逐条二次确认。所有权限以当前账号为准。</span></div></aside>
-      <main className="chat"><div className="chat-head"><div className="bot-avatar"><Bot size={22} /></div><div><h2>排课助手</h2><span>先预览，再执行</span></div></div>
+      <main className="chat"><div className="chat-head"><div className="bot-avatar"><Bot size={22} /></div><div><h2>课程助手</h2><span>可以聊天和处理课程 · 刷新后清空对话</span></div></div>
         <div className="feed" aria-live="polite">{history.length === 0 && <div className="welcome"><div className="welcome-symbol"><Sparkles size={24} /></div><h3>今天想处理什么？</h3><p>可以从下面的例子开始，也可以直接输入你的需求。</p><div className="examples">{initialExamples.map((text) => <button key={text} onClick={() => setInput(text)}>{text}</button>)}</div></div>}
           {history.map((item, index) => <div className={`bubble bubble--${item.role}`} key={index}>{item.text}</div>)}
           {preview && <div className="preview"><div className="preview-title"><h3>操作预览</h3>{preview.expiresInMinutes && <small>{preview.expiresInMinutes} 分钟内有效</small>}</div>{preview.actions.map((item, index) => <section className="action" key={index}><div className="action-top"><span className="number">{index + 1}</span><strong>{names[item.action.kind] ?? item.action.kind}</strong>{item.risk && <span className="risk">需逐条确认</span>}</div><p>{item.label}</p>{item.candidates && item.candidates.length > 1 && <label className="field">选择目标<select value={selection[String(index)] ?? ''} onChange={(event) => setSelection((old) => ({ ...old, [index]: Number(event.target.value) }))}><option value="">请选择</option>{item.candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}</select></label>}{item.result !== undefined && item.action.kind !== 'schedule_export' && <div className="read-result">{Array.isArray(item.result) ? (item.result.length ? item.result.map((entry, i) => <div key={i}>{typeof entry === 'object' && entry && 'label' in entry ? String(entry.label) : formatResultEntry(entry)}</div>) : '没有结果') : formatResultEntry(item.result)}</div>}{item.action.kind === 'schedule_export' && <button className="secondary" disabled={busy} onClick={() => void exportExcel(item.action.filters ?? {})}><Download size={16} />下载 Excel</button>}{item.action.kind === 'user_create' && preview.proposalId && <label className="field">初始密码<input type="password" autoComplete="new-password" minLength={5} value={passwords[String(index)] ?? ''} onChange={(event) => setPasswords((old) => ({ ...old, [index]: event.target.value }))} placeholder="仅用于创建账号，不发送给模型" /></label>}{item.risk && preview.proposalId && <label className="approval"><input type="checkbox" checked={approval.includes(index)} onChange={(event) => setApproval((old) => event.target.checked ? [...old, index] : old.filter((value) => value !== index))} /><span>我已核对第 {index + 1} 项的目标和影响，确认执行</span></label>}</section>)}{preview.proposalId && !result && <button className="button confirm" disabled={busy || preview.actions.some((item, index) => item.risk && !approval.includes(index))} onClick={() => void confirm()}>{busy ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}确认执行</button>}</div>}

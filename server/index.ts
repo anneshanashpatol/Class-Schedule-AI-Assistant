@@ -1,5 +1,5 @@
-import { ApiFailure, assertOrigin, assertRole, currentUser, errorResponse, mainApi, type Env, type ResolvedAction, type Schedule } from './core';
-import { clearSettings, parseInstruction, publicSettings, saveSettings, testModel } from './model';
+import { actionSchema, ApiFailure, assertOrigin, assertRole, currentUser, errorResponse, mainApi, type Env, type ResolvedAction, type Schedule } from './core';
+import { clearSettings, parseInstruction, publicSettings, saveSettings, testModel, type ConversationTurn } from './model';
 import { executeAction, expandActions, resolveAction } from './workflow';
 
 type StoredProposal = { id: string; user_id: number; actions_json: string; status: string; next_index: number; results_json: string; expires_at: string };
@@ -31,21 +31,27 @@ async function handler(request: Request, env: Env): Promise<Response> {
   if (path === '/settings/test' && request.method === 'POST') { assertRole(user, ['ADMIN']); return json(await testModel(env)); }
   if (path === '/export-data' && request.method === 'GET') {
     const filters = new URLSearchParams(url.search);
+    if (filters.has('startTime') || filters.has('endTime')) throw new ApiFailure(422, 'UNSUPPORTED_EXPORT_FILTER', '导出接口不支持直接按时间筛选');
     if (filters.has('id')) { filters.set('ids', filters.get('id')!); filters.delete('id'); }
     filters.set('limit', String(Math.min(1000, Math.max(1, Number(filters.get('limit') ?? 500)))));
     return json(await mainApi<Schedule[]>(env, request, `/schedules/export-data?${filters.toString()}`));
   }
   if (path === '/interpret' && request.method === 'POST') {
-    const body = await parseBody<{ input?: unknown; context?: unknown }>(request);
+    const body = await parseBody<{ input?: unknown; context?: unknown; pendingActions?: unknown }>(request);
     if (typeof body.input !== 'string' || !body.input.trim() || body.input.length > 1000) throw new ApiFailure(422, 'INVALID_INPUT', '请输入不超过 1000 字的指令');
     const now = Math.floor(Date.now() / 1000);
     const throttle = await env.AI_DB.prepare(`INSERT INTO model_call_cooldowns (user_id, next_allowed_at) VALUES (?, ?)
       ON CONFLICT(user_id) DO UPDATE SET next_allowed_at = excluded.next_allowed_at
       WHERE model_call_cooldowns.next_allowed_at <= ?`).bind(user.id, now + 3, now).run();
     if ((throttle.meta.changes ?? 0) === 0) throw new ApiFailure(429, 'TOO_MANY_REQUESTS', '发送太快，请稍等几秒再试');
-    const context = Array.isArray(body.context) ? body.context.filter((item): item is string => typeof item === 'string').slice(-4) : [];
-    const parsed = await parseInstruction(env, body.input, context, user.role);
-    if (!parsed.actions.length) return json({ question: parsed.question ?? '请补充要查询或操作的内容', actions: [] });
+    const context: ConversationTurn[] = Array.isArray(body.context) ? body.context
+      .filter((item): item is ConversationTurn => item && typeof item === 'object' &&
+        (item.role === 'user' || item.role === 'assistant') && typeof item.text === 'string')
+      .slice(-8).map((item) => ({ role: item.role, text: item.text.slice(0, 500) })) : [];
+    const pendingActions = Array.isArray(body.pendingActions) ? body.pendingActions.slice(0, 3)
+      .map((item) => actionSchema.safeParse(item)).filter((result) => result.success).map((result) => result.data) : [];
+    const parsed = await parseInstruction(env, body.input, context, user.role, pendingActions);
+    if (!parsed.actions.length) return json({ reply: parsed.reply, question: parsed.question, actions: [] });
     const actions = expandActions(parsed.actions);
     const resolved = await Promise.all(actions.map((action) => resolveAction(env, request, user, action)));
     const missing = resolved.flatMap((item) => item.missing ?? []);

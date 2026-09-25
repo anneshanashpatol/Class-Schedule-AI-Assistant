@@ -83,3 +83,54 @@ test('模型把可省略字段返回为 null 时仍能解析排课', async () =>
     } }]);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test('删课输出的筛选结构错误时只重试一次，并保留日期和起止时间', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    const content = calls === 1
+      ? JSON.stringify({ actions: [{ kind: 'schedule_delete', filters: { classDate: '2026-09-27', teacherName: '丁茗辉', studentNames: ['王康凯'] } }] })
+      : JSON.stringify({ actions: [{ kind: 'schedule_delete', filters: { dateFrom: '2026-09-27', dateTo: '2026-09-27', startTime: '10:00', endTime: '12:00', teacherName: '丁茗辉', studentName: '王康凯', subject: '数学' } }] });
+    return Response.json({ choices: [{ message: { content } }] });
+  };
+  try {
+    const parsed = await parseInstruction(await configuredEnv(), '9月27日10:00-12:00丁茗辉老师王康凯的数学课删了', [], 'ADMIN');
+    assert.equal(calls, 2);
+    assert.deepEqual(parsed.actions, [{ kind: 'schedule_delete', filters: { dateFrom: '2026-09-27', dateTo: '2026-09-27', startTime: '10:00', endTime: '12:00', teacherName: '丁茗辉', studentName: '王康凯', subject: '数学' } }]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('课程问答可自然回复，并只传最近的页面内对话', async () => {
+  const originalFetch = globalThis.fetch;
+  let sentConversation: unknown;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    sentConversation = JSON.parse(body.messages[1].content).recentConversation;
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ reply: '一课时通常按学校设定的时长计算，具体以课程设置为准。', actions: [] }) } }] });
+  };
+  try {
+    const context = [{ role: 'user' as const, text: '你好' }, { role: 'assistant' as const, text: '你好，想聊课程安排吗？' }];
+    const parsed = await parseInstruction(await configuredEnv(), '什么是一课时？', context, 'STUDENT');
+    assert.deepEqual(sentConversation, context);
+    assert.deepEqual(parsed, { actions: [], question: undefined, reply: '一课时通常按学校设定的时长计算，具体以课程设置为准。' });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('用户补充结束时间时把待补齐排课交给模型合并', async () => {
+  const originalFetch = globalThis.fetch;
+  let pendingInRequest: unknown;
+  globalThis.fetch = async (_input, init) => {
+    pendingInRequest = JSON.parse(JSON.parse(String(init?.body)).messages[1].content).pendingActions;
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ actions: [{ kind: 'schedule_create', fields: {
+      teacherName: '丁茗辉', studentNames: ['王康凯'], subject: '数学', classDate: '2026-09-27', startTime: '10:00', endTime: '12:00',
+    } }] }) } }] });
+  };
+  try {
+    const pending = [{ kind: 'schedule_create' as const, fields: { teacherName: '丁茗辉', studentNames: ['王康凯'], subject: '数学', classDate: '2026-09-27', startTime: '10:00' } }];
+    const result = await parseInstruction(await configuredEnv(), '12点结束', [{ role: 'assistant', text: '几点结束？' }], 'ADMIN', pending);
+    assert.deepEqual(pendingInRequest, pending);
+    assert.equal(result.actions[0].kind, 'schedule_create');
+    if (result.actions[0].kind === 'schedule_create') assert.equal(result.actions[0].fields.endTime, '12:00');
+  } finally { globalThis.fetch = originalFetch; }
+});

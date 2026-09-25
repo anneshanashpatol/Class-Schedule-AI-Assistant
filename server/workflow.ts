@@ -20,15 +20,18 @@ function describeFields(fields: Record<string, unknown>) {
   return Object.entries(fields).map(([key, value]) => `${names[key] ?? key}：${Array.isArray(value) ? value.join('、') : String(value)}`).join('，');
 }
 function describeFilters(filters: Record<string, unknown>) {
-  const names: Record<string, string> = { id: '编号', teacherName: '教师', studentName: '学生', dateFrom: '起始日期', dateTo: '结束日期', subject: '科目', classroom: '教室', completed: '完课状态' };
+  const names: Record<string, string> = { id: '编号', teacherName: '教师', studentName: '学生', dateFrom: '起始日期', dateTo: '结束日期', startTime: '开始时间', endTime: '结束时间', subject: '科目', classroom: '教室', completed: '完课状态' };
   return Object.entries(filters).map(([key, value]) => `${names[key] ?? key}：${value === 'true' ? '已完课' : value === 'false' ? '未完课' : value}`).join('，');
 }
 async function schedules(env: Env, request: Request, filters: Record<string, unknown>) {
+  const { startTime, endTime, ...apiFilters } = filters;
   if (filters.id) {
     const item = await mainApi<Schedule>(env, request, `/schedules/${filters.id}`);
-    return [item];
+    return (!startTime || item.start_time === startTime) && (!endTime || item.end_time === endTime) ? [item] : [];
   }
-  return mainApi<Schedule[]>(env, request, `/schedules?${qs(filters, { page: 1, pageSize: 100 })}`);
+  const found = await mainApi<Schedule[]>(env, request, `/schedules?${qs(apiFilters, { page: 1, pageSize: 100 })}`);
+  if (found.length === 100 && (startTime || endTime)) throw new ApiFailure(422, 'TOO_MANY_SCHEDULES', '待筛选课程超过 100 条，请补充日期、教师或学生');
+  return found.filter((item) => (!startTime || item.start_time === startTime) && (!endTime || item.end_time === endTime));
 }
 async function users(env: Env, request: Request, filters: Record<string, unknown>) {
   const query = { search: filters.username, role: filters.role, status: filters.status };
