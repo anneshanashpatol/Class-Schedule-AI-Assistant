@@ -22,7 +22,8 @@ export interface Candidate { id: number; label: string; snapshot: string; data: 
 
 export const scheduleFilters = z.object({
   id: z.number().int().positive().optional(), teacherName: z.string().optional(),
-  studentName: z.string().optional(), dateFrom: z.string().optional(), dateTo: z.string().optional(),
+  studentName: z.string().optional(), participantName: z.string().optional(), dateFrom: z.string().optional(), dateTo: z.string().optional(),
+  period: z.enum(['morning', 'afternoon', 'evening']).optional(),
   startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
   endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
   subject: z.string().optional(), classroom: z.string().optional(), completed: z.enum(['true', 'false']).optional(),

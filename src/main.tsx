@@ -115,10 +115,17 @@ function App() {
       const rows: Record<string, unknown>[] = [];
       for (let offset = 0; offset < 10000; offset += 500) {
         const params = new URLSearchParams();
-        Object.entries(filters).forEach(([key, value]) => { if (key !== 'startTime' && key !== 'endTime' && value !== undefined && value !== '') params.set(key, String(value)); });
+        Object.entries(filters).forEach(([key, value]) => { if (!['startTime', 'endTime', 'participantName', 'period'].includes(key) && value !== undefined && value !== '') params.set(key, String(value)); });
         params.set('offset', String(offset)); params.set('limit', '500');
         const batch = await api<Record<string, unknown>[]>(`/export-data?${params}`);
-        rows.push(...batch.filter((row) => (!filters.startTime || row.start_time === filters.startTime) && (!filters.endTime || row.end_time === filters.endTime)));
+        rows.push(...batch.filter((row) => {
+          const start = String(row.start_time ?? '');
+          const people = [row.teacher_name, ...(Array.isArray(row.student_names) ? row.student_names : [])]
+            .map((name) => String(name).trim().replace(/(?:老师|同学)$/, ''));
+          const periodMatches = !filters.period || (filters.period === 'morning' ? start < '12:00' : filters.period === 'afternoon' ? start >= '12:00' && start < '18:00' : start >= '18:00');
+          return (!filters.startTime || start === filters.startTime) && (!filters.endTime || row.end_time === filters.endTime) &&
+            (!filters.participantName || people.includes(String(filters.participantName).trim().replace(/(?:老师|同学)$/, ''))) && periodMatches;
+        }));
         if (batch.length < 500) break;
         if (offset === 9500) throw new Error('匹配课程超过 10000 条，请缩小导出范围');
       }

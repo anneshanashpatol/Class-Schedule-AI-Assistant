@@ -148,3 +148,36 @@ test('仅执行失败时的补充解释使用短输出，不发送课程或密�
     assert.match(sentBody?.messages[1].content ?? '', /目标课程已变化/);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test('完课操作的日期、时段和布尔值常见格式可安全归一', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ action: {
+      kind: 'schedule_completion', filters: { classDate: '2026-09-25', participantName: '包梦妍', period: '下午' }, completed: 'true',
+    } }) } }] });
+  };
+  try {
+    const parsed = await parseInstruction(await configuredEnv(), '帮我给今天下午包梦妍的课点完课', [], 'ADMIN');
+    assert.equal(calls, 1);
+    assert.deepEqual(parsed.actions, [{ kind: 'schedule_completion', filters: {
+      dateFrom: '2026-09-25', dateTo: '2026-09-25', participantName: '包梦妍', period: 'afternoon',
+    }, completed: true }]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('模型两次输出不合约定时转为追问，不返回格式错误', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return Response.json({ choices: [{ message: { content: '{"unknown":"value"}' } }] });
+  };
+  try {
+    const parsed = await parseInstruction(await configuredEnv(), '帮我处理这节课', [], 'ADMIN');
+    assert.equal(calls, 2);
+    assert.deepEqual(parsed.actions, []);
+    assert.match(parsed.question ?? '', /补充/);
+  } finally { globalThis.fetch = originalFetch; }
+});

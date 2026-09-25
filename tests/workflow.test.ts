@@ -53,6 +53,27 @@ test('按课程起止时间筛选删除目标，时间不传给原站不支持�
   assert.equal(result.risk, true);
 });
 
+test('按指定日期、时段和参与者查询真实课程后预览完课目标', async () => {
+  const lessons: Schedule[] = [
+    { id: 1, teacher_name: '王老师', student_names: ['包梦妍'], subject: '数学', class_date: '2026-09-25', start_time: '09:00', end_time: '10:00', classroom: '', is_completed: 0, version: 1 },
+    { id: 2, teacher_name: '王老师', student_names: ['包梦妍'], subject: '数学', class_date: '2026-09-25', start_time: '14:00', end_time: '15:00', classroom: '', is_completed: 0, version: 1 },
+    { id: 3, teacher_name: '包梦妍老师', student_names: ['李同学'], subject: '英语', class_date: '2026-09-25', start_time: '16:00', end_time: '17:00', classroom: '', is_completed: 0, version: 1 },
+  ];
+  const env = fakeEnv((forwarded) => {
+    const url = new URL(forwarded.url);
+    assert.equal(url.searchParams.get('dateFrom'), '2026-09-25');
+    assert.equal(url.searchParams.get('dateTo'), '2026-09-25');
+    assert.equal(url.searchParams.get('participantName'), null);
+    assert.equal(url.searchParams.get('period'), null);
+    return ok(lessons);
+  });
+  const result = await resolveAction(env, request, user, { kind: 'schedule_completion', filters: {
+    dateFrom: '2026-09-25', dateTo: '2026-09-25', participantName: '包梦妍', period: 'afternoon',
+  }, completed: true });
+  assert.deepEqual(result.candidates?.map((item) => item.id), [2, 3]);
+  assert.equal(result.selected, undefined);
+});
+
 test('学生通过原站登录信息查询自己的剩余课时', async () => {
   const env = fakeEnv((forwarded) => {
     assert.equal(new URL(forwarded.url).pathname, '/api/auth/me');

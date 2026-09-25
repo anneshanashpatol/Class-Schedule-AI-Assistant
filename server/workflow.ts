@@ -20,18 +20,23 @@ function describeFields(fields: Record<string, unknown>) {
   return Object.entries(fields).map(([key, value]) => `${names[key] ?? key}：${Array.isArray(value) ? value.join('、') : String(value)}`).join('，');
 }
 function describeFilters(filters: Record<string, unknown>) {
-  const names: Record<string, string> = { id: '编号', teacherName: '教师', studentName: '学生', dateFrom: '起始日期', dateTo: '结束日期', startTime: '开始时间', endTime: '结束时间', subject: '科目', classroom: '教室', completed: '完课状态' };
-  return Object.entries(filters).map(([key, value]) => `${names[key] ?? key}：${value === 'true' ? '已完课' : value === 'false' ? '未完课' : value}`).join('，');
+  const names: Record<string, string> = { id: '编号', teacherName: '教师', studentName: '学生', participantName: '教师或学生', dateFrom: '起始日期', dateTo: '结束日期', period: '时段', startTime: '开始时间', endTime: '结束时间', subject: '科目', classroom: '教室', completed: '完课状态' };
+  return Object.entries(filters).map(([key, value]) => `${names[key] ?? key}：${value === 'true' ? '已完课' : value === 'false' ? '未完课' : value === 'morning' ? '上午' : value === 'afternoon' ? '下午' : value === 'evening' ? '晚上' : value}`).join('，');
 }
 async function schedules(env: Env, request: Request, filters: Record<string, unknown>) {
-  const { startTime, endTime, ...apiFilters } = filters;
+  const { startTime, endTime, participantName, period, ...apiFilters } = filters;
+  const matchesLocal = (item: Schedule) =>
+    (!startTime || item.start_time === startTime) && (!endTime || item.end_time === endTime) &&
+    (!participantName || [item.teacher_name, ...item.student_names].some((name) =>
+      name.trim().replace(/(?:老师|同学)$/, '') === String(participantName).trim().replace(/(?:老师|同学)$/, ''))) &&
+    (!period || (period === 'morning' ? item.start_time < '12:00' : period === 'afternoon' ? item.start_time >= '12:00' && item.start_time < '18:00' : item.start_time >= '18:00'));
   if (filters.id) {
     const item = await mainApi<Schedule>(env, request, `/schedules/${filters.id}`);
-    return (!startTime || item.start_time === startTime) && (!endTime || item.end_time === endTime) ? [item] : [];
+    return matchesLocal(item) ? [item] : [];
   }
   const found = await mainApi<Schedule[]>(env, request, `/schedules?${qs(apiFilters, { page: 1, pageSize: 100 })}`);
-  if (found.length === 100 && (startTime || endTime)) throw new ApiFailure(422, 'TOO_MANY_SCHEDULES', '待筛选课程超过 100 条，请补充日期、教师或学生');
-  return found.filter((item) => (!startTime || item.start_time === startTime) && (!endTime || item.end_time === endTime));
+  if (found.length === 100 && (startTime || endTime || participantName || period)) throw new ApiFailure(422, 'TOO_MANY_SCHEDULES', '待筛选课程超过 100 条，请补充日期、教师或学生');
+  return found.filter(matchesLocal);
 }
 async function users(env: Env, request: Request, filters: Record<string, unknown>) {
   const query = { search: filters.username, role: filters.role, status: filters.status };

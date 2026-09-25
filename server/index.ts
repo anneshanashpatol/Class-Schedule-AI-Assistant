@@ -31,7 +31,7 @@ async function handler(request: Request, env: Env): Promise<Response> {
   if (path === '/settings/test' && request.method === 'POST') { assertRole(user, ['ADMIN']); return json(await testModel(env)); }
   if (path === '/export-data' && request.method === 'GET') {
     const filters = new URLSearchParams(url.search);
-    if (filters.has('startTime') || filters.has('endTime')) throw new ApiFailure(422, 'UNSUPPORTED_EXPORT_FILTER', '导出接口不支持直接按时间筛选');
+    if (['startTime','endTime','participantName','period'].some((key) => filters.has(key))) throw new ApiFailure(422, 'UNSUPPORTED_EXPORT_FILTER', '导出接口不支持直接按时段或参与者筛选');
     if (filters.has('id')) { filters.set('ids', filters.get('id')!); filters.delete('id'); }
     filters.set('limit', String(Math.min(1000, Math.max(1, Number(filters.get('limit') ?? 500)))));
     return json(await mainApi<Schedule[]>(env, request, `/schedules/export-data?${filters.toString()}`));
