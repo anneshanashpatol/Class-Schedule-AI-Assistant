@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseInstruction, testModel } from '../server/model';
+import { explainFailure, parseInstruction, testModel } from '../server/model';
 import { ApiFailure, type Env } from '../server/core';
 
 async function configuredEnv(): Promise<Env> {
@@ -132,5 +132,19 @@ test('用户补充结束时间时把待补齐排课交给模型合并', async ()
     assert.deepEqual(pendingInRequest, pending);
     assert.equal(result.actions[0].kind, 'schedule_create');
     if (result.actions[0].kind === 'schedule_create') assert.equal(result.actions[0].fields.endTime, '12:00');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('仅执行失败时的补充解释使用短输出，不发送课程或密码', async () => {
+  const originalFetch = globalThis.fetch;
+  let sentBody: { max_tokens: number; messages: { content: string }[] } | undefined;
+  globalThis.fetch = async (_input, init) => {
+    sentBody = JSON.parse(String(init?.body));
+    return Response.json({ choices: [{ message: { content: '课程已变化，请刷新后重新核对。' } }] });
+  };
+  try {
+    assert.equal(await explainFailure(await configuredEnv(), 'schedule_delete', '目标课程已变化', 0, 2), '课程已变化，请刷新后重新核对。');
+    assert.equal(sentBody?.max_tokens, 180);
+    assert.match(sentBody?.messages[1].content ?? '', /目标课程已变化/);
   } finally { globalThis.fetch = originalFetch; }
 });

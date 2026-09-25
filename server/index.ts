@@ -1,5 +1,5 @@
 import { actionSchema, ApiFailure, assertOrigin, assertRole, currentUser, errorResponse, mainApi, type Env, type ResolvedAction, type Schedule } from './core';
-import { clearSettings, parseInstruction, publicSettings, saveSettings, testModel, type ConversationTurn } from './model';
+import { clearSettings, explainFailure, parseInstruction, publicSettings, saveSettings, testModel, type ConversationTurn } from './model';
 import { executeAction, expandActions, resolveAction } from './workflow';
 
 type StoredProposal = { id: string; user_id: number; actions_json: string; status: string; next_index: number; results_json: string; expires_at: string };
@@ -93,9 +93,13 @@ async function handler(request: Request, env: Env): Promise<Response> {
         results.push({ index, status: 'success', data });
         await env.AI_DB.prepare('UPDATE proposals SET next_index = ?, results_json = ? WHERE id = ?').bind(index + 1, JSON.stringify(results), row.id).run();
       } catch (error) {
-        results.push({ index, status: 'failed', error: error instanceof Error ? error.message : '执行失败' });
+        const failure = error instanceof Error ? error.message : '执行失败';
+        results.push({ index, status: 'failed', error: failure });
         await env.AI_DB.prepare("UPDATE proposals SET status = 'FAILED', next_index = ?, results_json = ? WHERE id = ?").bind(index, JSON.stringify(results), row.id).run();
-        return json({ status: 'FAILED', results, remaining: actions.length - index - 1 });
+        let explanation: string | undefined;
+        try { explanation = await explainFailure(env, actions[index].action.kind, failure, index, actions.length - index - 1); }
+        catch { /* 系统错误已保存，模型说明是可选补充。 */ }
+        return json({ status: 'FAILED', results, remaining: actions.length - index - 1, explanation });
       }
     }
     await env.AI_DB.prepare("UPDATE proposals SET status = 'DONE' WHERE id = ?").bind(row.id).run();

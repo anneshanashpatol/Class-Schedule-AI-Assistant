@@ -60,11 +60,11 @@ export async function saveSettings(env: Env, body: unknown) {
 }
 export async function clearSettings(env: Env) { await env.AI_DB.prepare('DELETE FROM ai_settings WHERE id = 1').run(); }
 
-async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[], maxTokens = 4096, jsonMode = false) {
+async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[], maxTokens = 4096, jsonMode = false, timeoutMs = 45000) {
   const row = await getRow(env);
   if (!row) throw new ApiFailure(503, 'MODEL_NOT_CONFIGURED', '管理员尚未配置模型');
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const apiKey = await decrypt(env, row);
     const response = await fetch(row.endpoint, {
@@ -97,7 +97,7 @@ async function completion(env: Env, messages: { role: 'system' | 'user'; content
     return content;
   } catch (error) {
     if (error instanceof ApiFailure) throw error;
-    if (controller.signal.aborted) throw new ApiFailure(504, 'MODEL_TIMEOUT', '模型在 45 秒内未响应，请稍后重试');
+    if (controller.signal.aborted) throw new ApiFailure(504, 'MODEL_TIMEOUT', '模型响应超时，请稍后重试');
     throw new ApiFailure(502, 'MODEL_NETWORK_ERROR', '无法连接模型接口，未收到服务商响应；请联系管理员');
   } finally { clearTimeout(timeout); }
 }
@@ -105,6 +105,14 @@ async function completion(env: Env, messages: { role: 'system' | 'user'; content
 export async function testModel(env: Env) {
   const result = await completion(env, [{ role: 'user', content: '请只回复 OK' }], 512);
   return { connected: Boolean(result.trim()) };
+}
+
+export async function explainFailure(env: Env, kind: Action['kind'], error: string, completed: number, remaining: number): Promise<string> {
+  const content = await completion(env, [
+    { role: 'system', content: '你是课程助手。根据系统错误用一句简短中文解释为什么本次操作中断，以及用户下一步可以核对什么。不得声称失败项已执行，不得编造具体课程信息。只输出普通文字。' },
+    { role: 'user', content: JSON.stringify({ action: kind, systemError: error.slice(0, 240), completed, remaining }) },
+  ], 180, false, 6000);
+  return content.trim().slice(0, 300);
 }
 
 const modelOutput = z.object({ question: z.string().max(300).optional(), reply: z.string().max(1000).optional(), actions: z.array(actionSchema).max(20) });
