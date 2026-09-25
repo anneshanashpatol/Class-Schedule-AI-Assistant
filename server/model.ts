@@ -69,10 +69,11 @@ async function completion(env: Env, messages: { role: 'system' | 'user'; content
   try {
     apiKey = await decrypt(env, row);
     const response = await fetch(row.endpoint, {
-      method: 'POST', redirect: 'error', signal: controller.signal,
+      method: 'POST', redirect: 'manual', signal: controller.signal,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: row.model, messages, temperature: 0, max_tokens: maxTokens, stream: false }),
     });
+    if (response.status >= 300 && response.status < 400) throw new ApiFailure(502, 'MODEL_REDIRECT', '模型接口返回重定向；为保护 API Key，已拒绝跟随，请填写最终 HTTPS 地址');
     if (!response.ok) throw new ApiFailure(502, 'MODEL_ERROR', `模型服务返回 ${response.status}，请检查配置或稍后重试`);
     if (!response.body) throw new ApiFailure(502, 'MODEL_FORMAT', '模型返回内容为空');
     const reader = response.body.getReader();

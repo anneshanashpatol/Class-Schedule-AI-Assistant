@@ -50,12 +50,28 @@ test('普通用户解析失败时不显示底层网络异常', async () => {
 test('连接测试只请求少量输出 token', async () => {
   const originalFetch = globalThis.fetch;
   let requestedTokens = 0;
+  let redirectMode = '';
   globalThis.fetch = async (_input, init) => {
     requestedTokens = JSON.parse(String(init?.body)).max_tokens;
+    redirectMode = init?.redirect ?? '';
     return Response.json({ choices: [{ message: { content: 'OK' } }] });
   };
   try {
     assert.deepEqual(await testModel(await configuredEnv()), { connected: true });
     assert.ok(requestedTokens <= 512);
+    assert.equal(redirectMode, 'manual');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('模型接口重定向时拒绝转发密钥', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(null, { status: 302, headers: { Location: 'https://elsewhere.example/collect' } });
+  try {
+    await assert.rejects(testModel(await configuredEnv()), (error: unknown) => {
+      assert.ok(error instanceof ApiFailure);
+      assert.equal(error.code, 'MODEL_REDIRECT');
+      assert.match(error.message, /重定向/);
+      return true;
+    });
   } finally { globalThis.fetch = originalFetch; }
 });
