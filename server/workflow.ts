@@ -51,6 +51,13 @@ function addWeeks(date: string, weeks: number) {
   return parsed.toISOString().slice(0, 10);
 }
 function validDate(date: string) { const parsed = new Date(`${date}T00:00:00Z`); return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === date; }
+function sameName(left: string, right: string) { return left.trim().toLocaleLowerCase() === right.trim().toLocaleLowerCase(); }
+async function createConflicts(env: Env, request: Request, fields: { classDate?: string; startTime?: string; endTime?: string; teacherName?: string; studentNames?: string[] }) {
+  const lessons = await schedules(env, request, { dateFrom: fields.classDate, dateTo: fields.classDate });
+  const conflicts = lessons.filter((lesson) => lesson.start_time < fields.endTime! && lesson.end_time > fields.startTime! &&
+    (sameName(lesson.teacher_name, fields.teacherName!) || lesson.student_names.some((name) => fields.studentNames!.some((student) => sameName(name, student)))));
+  return { conflicts, incomplete: lessons.length === 100 };
+}
 export function expandActions(actions: Action[]): Action[] {
   const expanded: Action[] = [];
   for (const action of actions) {
@@ -70,7 +77,10 @@ export async function resolveAction(env: Env, request: Request, user: User, acti
     if (missing.length) return { action, label: '新增课程：请补齐教师、学生、科目、日期与起止时间', risk: false, missing };
     const f = action.fields;
     if (!validDate(f.classDate!) || f.startTime! >= f.endTime!) return { action, label: '课程日期或时间无效，请重新说明', risk: false, missing: ['有效日期和结束时间'] };
-    return { action, label: `新增课程：${f.classDate} ${f.startTime}–${f.endTime} · ${f.subject} · ${f.teacherName} · ${f.studentNames?.join('、')}`, risk: false };
+    const { conflicts, incomplete } = await createConflicts(env, request, f);
+    const warning = conflicts.length ? `；与 ${conflicts.length} 节现有课程的教师或学生时间重叠${conflicts.length <= 3 ? `：${conflicts.map((item) => `${item.start_time}–${item.end_time} ${item.subject}`).join('、')}` : ''}` : '';
+    const limitWarning = incomplete ? '；当天课程较多，请再核对原站课程表' : '';
+    return { action, label: `新增课程：${f.classDate} ${f.startTime}–${f.endTime} · ${f.subject} · ${f.teacherName} · ${f.studentNames?.join('、')}${warning}${limitWarning}`, risk: Boolean(conflicts.length || incomplete) };
   }
   if (action.kind === 'user_create') {
     assertRole(user, ['ADMIN']);

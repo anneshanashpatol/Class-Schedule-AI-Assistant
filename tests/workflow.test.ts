@@ -16,6 +16,20 @@ test('重复排课展开至具体日期并限制总条数', () => {
   assert.throws(() => expandActions(Array.from({ length: 21 }, () => ({ kind: 'schedule_search' as const, filters: {} }))), /一次最多/);
 });
 
+test('新增课程时间重叠时在预览标明并要求逐条确认', async () => {
+  const existing: Schedule = { id: 5, teacher_name: '张老师', student_names: ['王同学'], subject: '语文', class_date: '2026-09-29', start_time: '19:30', end_time: '20:30', classroom: '', is_completed: 0, version: 1 };
+  const env = fakeEnv((forwarded) => {
+    const url = new URL(forwarded.url);
+    assert.equal(url.pathname, '/api/schedules');
+    assert.equal(url.searchParams.get('dateFrom'), '2026-09-29');
+    assert.equal(url.searchParams.get('dateTo'), '2026-09-29');
+    return ok([existing]);
+  });
+  const result = await resolveAction(env, request, user, { kind: 'schedule_create', fields: { teacherName: '张老师', studentNames: ['李同学'], subject: '数学', classDate: '2026-09-29', startTime: '19:00', endTime: '20:00' } });
+  assert.equal(result.risk, true);
+  assert.match(result.label, /时间重叠/);
+});
+
 test('教师不可通过助手绕过原 API 的删课权限', async () => {
   await assert.rejects(() => resolveAction(fakeEnv(() => ok([])), request, { ...user, role: 'TEACHER' }, { kind: 'schedule_delete', filters: { teacherName: '张老师' } }), (error) => error instanceof ApiFailure && error.status === 403);
 });
