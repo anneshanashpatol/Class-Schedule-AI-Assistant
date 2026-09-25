@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseInstruction, testModel } from '../server/model';
+import { testModel } from '../server/model';
 import { ApiFailure, type Env } from '../server/core';
 
 async function configuredEnv(): Promise<Env> {
@@ -13,32 +13,11 @@ async function configuredEnv(): Promise<Env> {
   return { AI_CONFIG_KEY: encode(raw), AI_DB: { prepare: () => ({ first: async () => row }) } as unknown as D1Database } as Env;
 }
 
-test('立即发生的模型网络错误不会被显示为超时', async () => {
-  const originalFetch = globalThis.fetch;
-  const originalConsoleError = console.error;
-  let logged = '';
-  globalThis.fetch = async () => { throw new TypeError('fetch failed test-key'); };
-  console.error = (...parts: unknown[]) => { logged = JSON.stringify(parts); };
-  try {
-    await assert.rejects(testModel(await configuredEnv()), (error: unknown) => {
-      assert.ok(error instanceof ApiFailure);
-      assert.equal(error.code, 'MODEL_NETWORK_ERROR');
-      assert.match(error.message, /无法连接/);
-      assert.doesNotMatch(error.message, /超时/);
-      assert.match(error.message, /fetch failed/);
-      assert.doesNotMatch(error.message, /test-key/);
-      return true;
-    });
-    assert.match(logged, /fetch failed/);
-    assert.doesNotMatch(logged, /test-key/);
-  } finally { globalThis.fetch = originalFetch; console.error = originalConsoleError; }
-});
-
-test('普通用户解析失败时不显示底层网络异常', async () => {
+test('连接失败时不向页面暴露底层网络异常', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => { throw new TypeError('private network detail'); };
   try {
-    await assert.rejects(parseInstruction(await configuredEnv(), '查课', []), (error: unknown) => {
+    await assert.rejects(testModel(await configuredEnv()), (error: unknown) => {
       assert.ok(error instanceof ApiFailure);
       assert.equal(error.code, 'MODEL_NETWORK_ERROR');
       assert.doesNotMatch(error.message, /private network detail/);

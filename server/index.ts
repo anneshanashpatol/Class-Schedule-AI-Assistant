@@ -50,7 +50,7 @@ async function handler(request: Request, env: Env): Promise<Response> {
     const resolved = await Promise.all(actions.map((action) => resolveAction(env, request, user, action)));
     const missing = resolved.flatMap((item) => item.missing ?? []);
     if (missing.length) return json({ question: parsed.question ?? `请补充：${[...new Set(missing)].join('、')}`, actions: resolved });
-    const hasWrites = resolved.some((item) => !['schedule_search','schedule_export','user_search','adjustments_search'].includes(item.action.kind));
+    const hasWrites = resolved.some((item) => !['schedule_search','schedule_export','user_search','hours_balance','adjustments_search'].includes(item.action.kind));
     if (!hasWrites) return json({ actions: resolved });
     const id = crypto.randomUUID();
     await env.AI_DB.prepare("DELETE FROM proposals WHERE expires_at < datetime('now')").run();

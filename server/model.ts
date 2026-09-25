@@ -60,14 +60,13 @@ export async function saveSettings(env: Env, body: unknown) {
 }
 export async function clearSettings(env: Env) { await env.AI_DB.prepare('DELETE FROM ai_settings WHERE id = 1').run(); }
 
-async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[], maxTokens = 4096, diagnostics = false) {
+async function completion(env: Env, messages: { role: 'system' | 'user'; content: string }[], maxTokens = 4096) {
   const row = await getRow(env);
   if (!row) throw new ApiFailure(503, 'MODEL_NOT_CONFIGURED', '管理员尚未配置模型');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45000);
-  let apiKey = '';
   try {
-    apiKey = await decrypt(env, row);
+    const apiKey = await decrypt(env, row);
     const response = await fetch(row.endpoint, {
       method: 'POST', redirect: 'manual', signal: controller.signal,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -98,29 +97,20 @@ async function completion(env: Env, messages: { role: 'system' | 'user'; content
   } catch (error) {
     if (error instanceof ApiFailure) throw error;
     if (controller.signal.aborted) throw new ApiFailure(504, 'MODEL_TIMEOUT', '模型在 45 秒内未响应，请稍后重试');
-    const type = error instanceof Error ? error.name : typeof error;
-    const rawDetail = error instanceof Error ? error.message : String(error);
-    const detail = (apiKey ? rawDetail.replaceAll(apiKey, '[redacted]') : rawDetail).replace(/[\r\n]+/g, ' ').slice(0, 200);
-    console.error('Model API network failure', {
-      host: new URL(row.endpoint).hostname,
-      type,
-      detail,
-    });
-    throw new ApiFailure(502, 'MODEL_NETWORK_ERROR', diagnostics
-      ? `无法连接模型接口，未收到服务商响应（${type}: ${detail}）`
-      : '无法连接模型接口，未收到服务商响应；请联系管理员');
+    throw new ApiFailure(502, 'MODEL_NETWORK_ERROR', '无法连接模型接口，未收到服务商响应；请联系管理员');
   } finally { clearTimeout(timeout); }
 }
 
 export async function testModel(env: Env) {
-  const result = await completion(env, [{ role: 'user', content: '请只回复 OK' }], 512, true);
+  const result = await completion(env, [{ role: 'user', content: '请只回复 OK' }], 512);
   return { connected: Boolean(result.trim()) };
 }
 
 const modelOutput = z.object({ question: z.string().max(300).optional(), actions: z.array(actionSchema).max(20) });
 const systemPrompt = `你是中文排课管理指令解析器。只输出 JSON 对象，不要 Markdown。格式 {"question":"信息不足时的简短追问，可省略","actions":[...]}。
-允许 kind：schedule_search(filters), schedule_export(filters), schedule_create(fields,repeatWeeks?), schedule_update(filters,fields), schedule_delete(filters), schedule_completion(filters,completed), user_search(filters), user_create(fields), user_update(filters,fields), user_status(filters,status), user_delete(filters), hours_adjust(filters,amountHundredths,note), adjustments_search(filters)。
-课程 filters 可用 id,teacherName,studentName,dateFrom,dateTo,subject,classroom,completed("true"/"false")；用户 filters 可用 id,username,role,status。不要猜测数据库 ID。日期用 YYYY-MM-DD，时间用 HH:mm。缺少必填信息请写 question，不要猜结束时间、密码、用户身份或目标。重复排课用 repeatWeeks（包含首周，最多20），不要自行列出20条。调整余额单位为百分之一课时，必须有原因。不要生成密码操作。单次最多20项。`;
+允许 kind：schedule_search(filters), schedule_export(filters), schedule_create(fields,repeatWeeks?), schedule_update(filters,fields), schedule_delete(filters), schedule_completion(filters,completed), user_search(filters), hours_balance(filters), user_create(fields), user_update(filters,fields), user_status(filters,status), user_delete(filters), hours_adjust(filters,amountHundredths,note), adjustments_search(filters)。
+查询“剩余课时”“课时余额”“还有多少课时”必须使用 hours_balance；当前学生查自己余额时 filters 用空对象；管理员查指定学生时 filters.username 填姓名，查全部学生时 filters 用空对象。查询余额不是调整余额，不能用 hours_adjust。
+课程 filters 可用 id,teacherName,studentName,dateFrom,dateTo,subject,classroom,completed("true"/"false")；用户 filters 可用 id,username,role,status。课程 fields 使用 teacherName、studentNames(姓名数组)、subject、classDate、startTime、endTime、classroom；用户 fields 使用 username、role(ADMIN/TEACHER/STUDENT)、subject、school、grade。新增课程必须有教师、学生、科目、日期和起止时间；新增用户必须有姓名及身份，密码由页面收集。不要猜测数据库 ID。日期用 YYYY-MM-DD，时间用 HH:mm。缺少必填信息请写 question，不要猜结束时间、密码、用户身份或目标。重复排课用 repeatWeeks（包含首周，最多20），不要自行列出20条。调整余额单位为百分之一课时，必须有原因。不要生成密码操作。单次最多20项。`;
 export async function parseInstruction(env: Env, input: string, context: string[]): Promise<{ question?: string; actions: Action[] }> {
   const now = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short' }).format(new Date());
   const content = await completion(env, [

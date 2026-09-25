@@ -11,7 +11,9 @@ function scheduleCandidate(item: Schedule): Candidate {
 }
 function userCandidate(item: UserRecord): Candidate {
   const role = { ADMIN: '管理员', TEACHER: '教师', STUDENT: '学生' }[item.role];
-  return { id: item.id, label: `${item.display_name} · ${role} · ${item.status === 'ACTIVE' ? '启用' : '停用'}`, snapshot: fingerprint(item), data: item };
+  const balance = item.role === 'STUDENT' && typeof item.remaining_hundredths === 'number'
+    ? ` · 剩余 ${item.remaining_hundredths / 100} 课时` : '';
+  return { id: item.id, label: `${item.display_name} · ${role} · ${item.status === 'ACTIVE' ? '启用' : '停用'}${balance}`, snapshot: fingerprint(item), data: item };
 }
 function describeFields(fields: Record<string, unknown>) {
   const names: Record<string, string> = { teacherName: '教师', studentNames: '学生', subject: '科目', classDate: '日期', startTime: '开始时间', endTime: '结束时间', classroom: '教室', username: '姓名', school: '学校', grade: '年级' };
@@ -29,8 +31,15 @@ async function schedules(env: Env, request: Request, filters: Record<string, unk
   return mainApi<Schedule[]>(env, request, `/schedules?${qs(filters, { page: 1, pageSize: 100 })}`);
 }
 async function users(env: Env, request: Request, filters: Record<string, unknown>) {
-  const found = await mainApi<UserRecord[]>(env, request, `/users?${qs({ search: filters.username, role: filters.role, status: filters.status }, { page: 1, pageSize: 100 })}`);
-  return found.filter((item) => !filters.id || item.id === filters.id);
+  const query = { search: filters.username, role: filters.role, status: filters.status };
+  if (!filters.id) return mainApi<UserRecord[]>(env, request, `/users?${qs(query, { page: 1, pageSize: 100 })}`);
+  for (let page = 1; page <= 5; page++) {
+    const found = await mainApi<UserRecord[]>(env, request, `/users?${qs(query, { page, pageSize: 100 })}`);
+    const target = found.find((item) => item.id === filters.id);
+    if (target) return [target];
+    if (found.length < 100) return [];
+  }
+  throw new ApiFailure(422, 'USER_NAME_REQUIRED', '用户数量较多，请同时提供准确姓名以定位该编号');
 }
 function required(fields: Record<string, unknown>, names: string[]): string[] {
   return names.filter((name) => fields[name] === undefined || fields[name] === '' || (Array.isArray(fields[name]) && fields[name].length === 0));
@@ -87,6 +96,22 @@ export async function resolveAction(env: Env, request: Request, user: User, acti
     const impact = action.kind === 'schedule_delete' ? '；删除后不可恢复，已完课课程不会返还课时' : action.kind === 'schedule_update' ? `；改为 ${describeFields(action.fields)}` : action.kind === 'schedule_completion' ? `；改为${action.completed ? '已完课' : '未完课'}` : '';
     return { action, label: `${verb}：${selected?.label ?? `请从 ${found.length} 条匹配课程中选择`}${impact}`, risk: action.kind === 'schedule_delete', candidates: found, selected };
   }
+  if (action.kind === 'hours_balance') {
+    if (user.role === 'STUDENT') {
+      if ((action.filters.id && action.filters.id !== user.id) ||
+          (action.filters.username && action.filters.username !== user.displayName) ||
+          (action.filters.role && action.filters.role !== 'STUDENT') || action.filters.status) {
+        throw new ApiFailure(403, 'FORBIDDEN', '学生只能查询自己的剩余课时');
+      }
+      const own = await mainApi<User>(env, request, '/auth/me');
+      return { action, label: '我的剩余课时', risk: false,
+        result: { label: typeof own.remainingHundredths === 'number' ? `${own.displayName} · 剩余 ${own.remainingHundredths / 100} 课时` : '尚无课时余额记录' } };
+    }
+    assertRole(user, ['ADMIN']);
+    if (action.filters.role && action.filters.role !== 'STUDENT') throw new ApiFailure(422, 'STUDENT_REQUIRED', '只能查询学生的剩余课时');
+    const found = (await users(env, request, { ...action.filters, role: 'STUDENT' })).map(userCandidate);
+    return { action, label: `找到 ${found.length} 位学生${found.length === 100 ? '（仅显示前100位，请缩小姓名范围）' : ''}`, risk: false, result: found };
+  }
   assertRole(user, ['ADMIN']);
   if (action.kind === 'user_search') {
     const found = (await users(env, request, action.filters)).map(userCandidate);
@@ -113,7 +138,7 @@ export async function resolveAction(env: Env, request: Request, user: User, acti
 
 export async function executeAction(env: Env, request: Request, item: ResolvedAction, password?: string) {
   const action = item.action;
-  if (action.kind === 'schedule_search' || action.kind === 'user_search' || action.kind === 'schedule_export') return item.result;
+  if (action.kind === 'schedule_search' || action.kind === 'user_search' || action.kind === 'hours_balance' || action.kind === 'schedule_export') return item.result;
   if (action.kind === 'schedule_create') return mainApi(env, request, '/schedules', { method: 'POST', body: JSON.stringify({ ...action.fields, classroom: action.fields.classroom ?? '' }) });
   if (action.kind === 'user_create') {
     if (!password || password.length < 5) throw new ApiFailure(422, 'PASSWORD_REQUIRED', '请输入至少 5 位初始密码');

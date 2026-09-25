@@ -20,6 +20,56 @@ test('教师不可通过助手绕过原 API 的删课权限', async () => {
   await assert.rejects(() => resolveAction(fakeEnv(() => ok([])), request, { ...user, role: 'TEACHER' }, { kind: 'schedule_delete', filters: { teacherName: '张老师' } }), (error) => error instanceof ApiFailure && error.status === 403);
 });
 
+test('学生通过原站登录信息查询自己的剩余课时', async () => {
+  const env = fakeEnv((forwarded) => {
+    assert.equal(new URL(forwarded.url).pathname, '/api/auth/me');
+    return ok({ id: 3, displayName: '李同学', role: 'STUDENT', status: 'ACTIVE', remainingHundredths: 125 });
+  });
+  const result = await resolveAction(env, request, { ...user, role: 'STUDENT' }, { kind: 'hours_balance', filters: {} });
+  assert.deepEqual(result.result, { label: '李同学 · 剩余 1.25 课时' });
+  const own = await resolveAction(env, request, { id: 3, displayName: '李同学', role: 'STUDENT', status: 'ACTIVE' }, { kind: 'hours_balance', filters: { role: 'STUDENT', username: '李同学' } });
+  assert.deepEqual(own.result, result.result);
+  await assert.rejects(() => resolveAction(env, request, { ...user, role: 'STUDENT' }, { kind: 'hours_balance', filters: { username: '别人' } }),
+    (error) => error instanceof ApiFailure && error.status === 403);
+});
+
+test('管理员按姓名查询学生剩余课时，教师不可读取', async () => {
+  const env = fakeEnv((forwarded) => {
+    const url = new URL(forwarded.url);
+    assert.equal(url.pathname, '/api/users');
+    assert.equal(url.searchParams.get('role'), 'STUDENT');
+    assert.equal(url.searchParams.get('search'), '李');
+    return ok([{ id: 3, username: '李同学', display_name: '李同学', role: 'STUDENT', status: 'ACTIVE', remaining_hundredths: 250 }]);
+  });
+  const action = { kind: 'hours_balance' as const, filters: { username: '李' } };
+  const result = await resolveAction(env, request, user, action);
+  assert.match(JSON.stringify(result.result), /李同学 · 学生 · 启用 · 剩余 2.5 课时/);
+  await assert.rejects(() => resolveAction(env, request, { ...user, role: 'TEACHER' }, action),
+    (error) => error instanceof ApiFailure && error.status === 403);
+});
+
+test('管理员可列出学生余额，沿用原站用户列表权限', async () => {
+  const env = fakeEnv((forwarded) => {
+    const url = new URL(forwarded.url);
+    assert.equal(url.searchParams.get('role'), 'STUDENT');
+    assert.equal(url.searchParams.get('search'), null);
+    return ok([{ id: 4, username: '王同学', display_name: '王同学', role: 'STUDENT', status: 'ACTIVE', remaining_hundredths: 0 }]);
+  });
+  const result = await resolveAction(env, request, user, { kind: 'hours_balance', filters: {} });
+  assert.match(JSON.stringify(result.result), /剩余 0 课时/);
+});
+
+test('按用户编号查询会继续查分页，找不到时不会误报不存在', async () => {
+  const env = fakeEnv((forwarded) => {
+    const page = Number(new URL(forwarded.url).searchParams.get('page'));
+    if (page === 1) return ok(Array.from({ length: 100 }, (_, index) => ({ id: index + 1 })));
+    if (page === 2) return ok([{ id: 150, username: '李同学', display_name: '李同学', role: 'STUDENT', status: 'ACTIVE', remaining_hundredths: 300 }]);
+    throw new Error('不应继续请求');
+  });
+  const result = await resolveAction(env, request, user, { kind: 'hours_balance', filters: { id: 150 } });
+  assert.match(JSON.stringify(result.result), /剩余 3 课时/);
+});
+
 test('业务请求仅转发当前会话，并对写操作设置同源 Origin', async () => {
   const env = fakeEnv(async (forwarded) => {
     assert.equal(new URL(forwarded.url).pathname, '/api/schedules');

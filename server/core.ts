@@ -8,7 +8,7 @@ export interface Env {
 }
 
 export type Role = 'ADMIN' | 'TEACHER' | 'STUDENT';
-export interface User { id: number; displayName: string; role: Role; status: string }
+export interface User { id: number; displayName: string; role: Role; status: string; remainingHundredths?: number }
 export interface Schedule {
   id: number; teacher_name: string; student_names: string[]; subject: string;
   class_date: string; start_time: string; end_time: string; classroom: string;
@@ -44,6 +44,7 @@ export const actionSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('schedule_delete'), filters: scheduleFilters }),
   z.object({ kind: z.literal('schedule_completion'), filters: scheduleFilters, completed: z.boolean() }),
   z.object({ kind: z.literal('user_search'), filters: userFilters }),
+  z.object({ kind: z.literal('hours_balance'), filters: userFilters }),
   z.object({ kind: z.literal('user_create'), fields: userFields }),
   z.object({ kind: z.literal('user_update'), filters: userFilters, fields: userFields }),
   z.object({ kind: z.literal('user_status'), filters: userFilters, status: z.enum(['ACTIVE','DISABLED']) }),
