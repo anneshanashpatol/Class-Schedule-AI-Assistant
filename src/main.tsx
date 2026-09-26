@@ -69,6 +69,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
+  const [interpreting, setInterpreting] = useState(false);
   const [history, setHistory] = useState<{ role: 'user' | 'assistant'; text: string }[]>([]);
   const [activeIntent, setActiveIntent] = useState<string | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -84,7 +85,7 @@ function App() {
     event?.preventDefault();
     if (!input.trim() || busy) return;
     const message = input.trim();
-    setInput(''); setBusy(true); setError(''); setResult(null);
+    setInput(''); setBusy(true); setInterpreting(true); setError(''); setResult(null);
     const context = history.slice(-8).map((item) => ({ role: item.role, text: item.text.slice(0, 500) }));
     const pendingActions = preview?.question ? preview.actions.slice(0, 3).map((item) => item.action) : [];
     setHistory((items) => [...items, { role: 'user', text: message }]);
@@ -102,7 +103,7 @@ function App() {
       setError(message);
       setHistory((items) => [...items, { role: 'assistant', text: message }]);
     }
-    finally { setBusy(false); }
+    finally { setInterpreting(false); setBusy(false); }
   }
 
   async function confirm() {
@@ -111,6 +112,7 @@ function App() {
     try {
       const response = await api<Result>('/confirm', { method: 'POST', body: JSON.stringify({ proposalId: preview.proposalId, selections: selection, approvals: approval, passwords }) });
       setResult(response);
+      setPreview(null);
       setActiveIntent(null);
       const failed = response.results.find((item) => item.status === 'failed');
       const summary = response.status === 'DONE' ? `操作已完成，共成功 ${response.results.length} 项。`
@@ -170,9 +172,9 @@ function App() {
       <main className="chat"><div className="chat-head"><div className="bot-avatar"><Bot size={22} /></div><div><h2>课程助手</h2><span>可以聊天和处理课程 · 刷新后清空对话</span></div></div>
         <div className="feed" aria-live="polite">{history.length === 0 && <div className="welcome"><div className="welcome-symbol"><Sparkles size={24} /></div><h3>今天想处理什么？</h3><p>可以从下面的例子开始，也可以直接输入你的需求。</p><div className="examples">{initialExamples.map((text) => <button key={text} onClick={() => setInput(text)}>{text}</button>)}</div></div>}
           {history.map((item, index) => <div className={`bubble bubble--${item.role}`} key={index}>{item.text}</div>)}
-          {preview && <div className="preview"><div className="preview-title"><h3>操作预览</h3>{preview.expiresInMinutes && <small>{preview.expiresInMinutes} 分钟内有效</small>}</div>{preview.actions.map((item, index) => <section className="action" key={index}><div className="action-top"><span className="number">{index + 1}</span><strong>{names[item.action.kind] ?? item.action.kind}</strong>{item.risk && <span className="risk">需逐条确认</span>}</div><p>{item.label}</p>{item.candidates && item.candidates.length > 1 && <label className="field">选择目标<select value={selection[String(index)] ?? ''} onChange={(event) => setSelection((old) => ({ ...old, [index]: Number(event.target.value) }))}><option value="">请选择</option>{item.candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}</select></label>}{item.result !== undefined && item.action.kind !== 'schedule_export' && <div className="read-result">{Array.isArray(item.result) ? (item.result.length ? item.result.map((entry, i) => <div key={i}>{typeof entry === 'object' && entry && 'label' in entry ? String(entry.label) : formatResultEntry(entry)}</div>) : '没有结果') : formatResultEntry(item.result)}</div>}{item.action.kind === 'schedule_export' && <button className="secondary" disabled={busy} onClick={() => void exportExcel(item.action.filters ?? {})}><Download size={16} />下载 Excel</button>}{item.action.kind === 'user_create' && preview.proposalId && <label className="field">初始密码<input type="password" autoComplete="new-password" minLength={5} value={passwords[String(index)] ?? ''} onChange={(event) => setPasswords((old) => ({ ...old, [index]: event.target.value }))} placeholder="仅用于创建账号，不发送给模型" /></label>}{item.risk && preview.proposalId && <label className="approval"><input type="checkbox" checked={approval.includes(index)} onChange={(event) => setApproval((old) => event.target.checked ? [...old, index] : old.filter((value) => value !== index))} /><span>我已核对第 {index + 1} 项的目标和影响，确认执行</span></label>}</section>)}{preview.proposalId && !result && <button className="button confirm" disabled={busy || preview.actions.some((item, index) => item.risk && !approval.includes(index))} onClick={() => void confirm()}>{busy ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}确认执行</button>}</div>}
+          {preview && !interpreting && <div className="preview"><div className="preview-title"><h3>操作预览</h3>{preview.expiresInMinutes && <small>{preview.expiresInMinutes} 分钟内有效</small>}</div>{preview.actions.map((item, index) => <section className="action" key={index}><div className="action-top"><span className="number">{index + 1}</span><strong>{names[item.action.kind] ?? item.action.kind}</strong>{item.risk && <span className="risk">需逐条确认</span>}</div><p>{item.label}</p>{item.candidates && item.candidates.length > 1 && <label className="field">选择目标<select value={selection[String(index)] ?? ''} onChange={(event) => setSelection((old) => ({ ...old, [index]: Number(event.target.value) }))}><option value="">请选择</option>{item.candidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}</select></label>}{item.result !== undefined && item.action.kind !== 'schedule_export' && <div className="read-result">{Array.isArray(item.result) ? (item.result.length ? item.result.map((entry, i) => <div key={i}>{typeof entry === 'object' && entry && 'label' in entry ? String(entry.label) : formatResultEntry(entry)}</div>) : '没有结果') : formatResultEntry(item.result)}</div>}{item.action.kind === 'schedule_export' && <button className="secondary" disabled={busy} onClick={() => void exportExcel(item.action.filters ?? {})}><Download size={16} />下载 Excel</button>}{item.action.kind === 'user_create' && preview.proposalId && <label className="field">初始密码<input type="password" autoComplete="new-password" minLength={5} value={passwords[String(index)] ?? ''} onChange={(event) => setPasswords((old) => ({ ...old, [index]: event.target.value }))} placeholder="仅用于创建账号，不发送给模型" /></label>}{item.risk && preview.proposalId && <label className="approval"><input type="checkbox" checked={approval.includes(index)} onChange={(event) => setApproval((old) => event.target.checked ? [...old, index] : old.filter((value) => value !== index))} /><span>我已核对第 {index + 1} 项的目标和影响，确认执行</span></label>}</section>)}{preview.proposalId && !result && <button className="button confirm" disabled={busy || preview.actions.some((item, index) => item.risk && !approval.includes(index))} onClick={() => void confirm()}>{busy ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}确认执行</button>}</div>}
           {result && <div className="result"><h3>{result.status === 'DONE' ? '执行完成' : '执行中断'}</h3>{result.results.map((item) => <p key={item.index}>第 {item.index + 1} 项：{item.status === 'success' ? `成功${item.data == null ? '' : ` · ${formatResultEntry(item.data)}`}` : `失败 · ${item.error}`}</p>)}{Boolean(result.remaining) && <small>其余 {result.remaining} 项未执行。</small>}{result.explanation && <p>AI 补充：{result.explanation}</p>}{result.message && <small>{result.message}</small>}</div>}
-          {error && <div className="error" role="alert">{error}</div>}{busy && !preview && <div className="thinking"><Loader2 className="spin" size={17} />正在理解并核对…</div>}</div>
+          {error && <div className="error" role="alert">{error}</div>}{interpreting && <div className="thinking"><Loader2 className="spin" size={17} />模型正在理解并处理…</div>}</div>
         <form className="composer" onSubmit={(event) => void send(event)}><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="例如：本月××号，××:00-××:00，给老师：×××，学生：×××排一节××课" maxLength={1000} rows={2} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }} /><div className="composer-bottom"><span>Enter 发送 · Shift + Enter 换行</span><button className="button" disabled={busy || !input.trim()} aria-label="发送指令"><Send size={17} />发送</button></div></form>
       </main></div>{settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
   </div>;
