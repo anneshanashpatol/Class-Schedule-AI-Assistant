@@ -11,6 +11,50 @@ export interface AgentPlan {
   intentKind?: Kind;
 }
 
+const hourQuantity = /(?<![\d.])(\d+(?:\.\d{1,2})?|半|[一二两三四五六七八九十]+)(?:个)?(半)?\s*课时(?![\d.])/g;
+const hourDirection = /增加|添加|加上|加|补充|补回|充值|返还|减少|删减|删除|扣除|扣掉|减掉|扣|减/g;
+const negativeHours = /^(?:减少|删减|删除|扣除|扣掉|减掉|扣|减)$/;
+
+function chineseHours(value: string): number | undefined {
+  if (value === '半') return 0.5;
+  if (/^\d+(?:\.\d{1,2})?$/.test(value)) return Number(value);
+  const digits: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (value === '十') return 10;
+  if (value.includes('十')) {
+    const [tens, ones] = value.split('十');
+    if ((tens && !digits[tens]) || (ones && !digits[ones])) return undefined;
+    return (tens ? digits[tens] : 1) * 10 + (ones ? digits[ones] : 0);
+  }
+  return digits[value];
+}
+
+export function hoursFromUserWords(input: string): number | undefined {
+  const matches = [...input.matchAll(hourQuantity)];
+  if (matches.length !== 1) return undefined;
+  const match = matches[0];
+  const hours = chineseHours(match[1]);
+  const total = hours === undefined ? undefined : hours + (match[2] ? 0.5 : 0);
+  if (total === undefined || total <= 0 || !Number.isSafeInteger(Math.round(total * 100)) ||
+      Math.abs(total * 100 - Math.round(total * 100)) > 1e-8) return undefined;
+  const before = input.slice(0, match.index);
+  if (/(?:不要|别|不是|取消|不用).{0,12}$/.test(before)) return undefined;
+  const directions = [...before.matchAll(hourDirection)];
+  const direction = directions.at(-1)?.[0];
+  if (!direction) return undefined;
+  return Math.round(total * 100) * (negativeHours.test(direction) ? -1 : 1);
+}
+
+function groundHourActions(actions: Action[], input: string, context: ConversationTurn[], pendingActions: Action[], activeKind?: Kind): Action[] {
+  let amount = hoursFromUserWords(input);
+  if (amount === undefined && [...input.matchAll(hourQuantity)].length === 0 && activeKind === 'hours_adjust') {
+    const pendingHours = pendingActions.filter((action) => action.kind === 'hours_adjust');
+    if (pendingHours.length === 1) amount = pendingHours[0].amountHundredths;
+    else amount = hoursFromUserWords(context.filter((turn) => turn.role === 'user').at(-1)?.text ?? '');
+  }
+  return actions.map((action) => action.kind === 'hours_adjust'
+    ? { ...action, amountHundredths: amount ?? 0 } : action);
+}
+
 function groundActions(actions: Action[], input: string, context: ConversationTurn[], activeKind?: Kind): Action[] {
   const userWords = activeKind && input.length < 12
     ? [...context.filter((turn) => turn.role === 'user').slice(-4).map((turn) => turn.text), input].join(' ')
@@ -65,7 +109,7 @@ export async function planAgentTurn(env: Env, request: Request, user: User, inpu
     actions: [], hasWrites: false, intentKind: continuedKind,
   };
 
-  const grounded = groundActions(parsed.actions, input, context, activeKind);
+  const grounded = groundHourActions(groundActions(parsed.actions, input, context, activeKind), input, context, pendingActions, activeKind);
   for (const action of grounded) assertSkillRole(action.kind, user.role);
   const actions = expandActions(grounded);
   const resolved = await Promise.all(actions.map((action) => resolveAction(env, request, user, action)));

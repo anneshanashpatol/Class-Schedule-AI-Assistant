@@ -10,7 +10,7 @@ const planTool = { type: 'function', function: { name: 'submit_course_action_pla
     actions: { type: 'array', items: { type: 'object', properties: {
       kind: { type: 'string', enum: Object.keys(skills) }, filters: { type: 'object' }, fields: { type: 'object' },
       completed: { type: 'boolean' }, status: { type: 'string' }, repeatWeeks: { type: 'integer' },
-      amountHundredths: { type: 'integer' }, note: { type: 'string' },
+      amountHundredths: { type: 'integer', description: '百分之一课时为单位；增加1课时为100，扣除1课时为-100。' }, note: { type: 'string' },
     }, required: ['kind'] } },
     reply: { type: 'string' }, question: { type: 'string' }, intentKind: { type: 'string', enum: Object.keys(skills) },
   }, required: ['actions'] },

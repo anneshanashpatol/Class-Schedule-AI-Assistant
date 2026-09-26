@@ -49,7 +49,7 @@ export const skills: Record<Kind, Skill> = {
     instruction: '使用 filters；学生只能查自己的余额，查本人时 filters 为空；管理员可按 username 查学生。',
     clarification: '请说明要查询哪位学生的剩余课时。' },
   hours_adjust: { name: '调整学生课时余额', roles: managers, readOnly: false,
-    instruction: 'filters 定位学生，amountHundredths 为百分之一课时整数，note 为调整原因；必须逐条二次确认。',
+    instruction: 'filters 定位学生。amountHundredths 是后端整数单位：用户说增加 1 课时填 100，减少 1 课时填 -100，增加 0.5 课时填 50。必须有用户给的调整原因 note；逐条二次确认。',
     clarification: '请补充学生姓名、调整数量和原因。' },
   adjustments_search: { name: '查询课时调整记录', roles: managers, readOnly: true,
     instruction: 'filters 定位单个学生；原 API 只提供按学生查询调整记录。',
@@ -86,7 +86,7 @@ const intentSignals: Partial<Record<Kind, RegExp>> = {
   user_status: /(?:停用|启用|禁用|恢复).{0,10}(?:用户|账号|老师|学生)/,
   user_update: /(?:编辑|修改).{0,10}(?:用户|账号|教师资料|学生资料)/,
   user_search: /(?:查询|查找|搜索).{0,10}(?:用户|账号)/,
-  hours_adjust: /(?:调整|增加|减少|充值|扣除).{0,10}(?:课时|余额)/,
+  hours_adjust: /(?:调整|增加|添加|减少|删减|删除|充值|扣除|加|减).{0,10}(?:课时|余额)/,
   hours_balance: /(?:剩余课时|课时余额|还有多少课时)/,
   adjustments_search: /(?:课时调整记录|余额调整记录|调整记录)/,
 };

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planAgentTurn } from '../server/agent';
+import { hoursFromUserWords, planAgentTurn } from '../server/agent';
 import { assertSkillRole, detectIntent, skills } from '../server/skills';
 import { expandActions } from '../server/workflow';
 import { ApiFailure, type Env, type User } from '../server/core';
@@ -177,4 +177,42 @@ test('一次只允许一个删除操作', () => {
     { kind: 'schedule_delete', filters: { dateFrom: '2026-09-27' } },
     { kind: 'user_delete', filters: { username: '王老师' } },
   ]), (error: unknown) => error instanceof ApiFailure && error.code === 'BULK_DELETE_UNSUPPORTED');
+});
+
+test('课时按用户说的数量换算为后端百分之一课时单位', () => {
+  assert.equal(hoursFromUserWords('给小齐增加1个课时'), 100);
+  assert.equal(hoursFromUserWords('给小齐添加0.5课时'), 50);
+  assert.equal(hoursFromUserWords('给小齐添加0.01课时'), 1);
+  assert.equal(hoursFromUserWords('扣除小齐1.25课时'), -125);
+  assert.equal(hoursFromUserWords('给小齐减少一个半课时'), -150);
+  assert.equal(hoursFromUserWords('给小齐加半课时'), 50);
+  assert.equal(hoursFromUserWords('给小齐添加二十课时'), 2000);
+  assert.equal(hoursFromUserWords('把小齐余额调整为10课时'), undefined);
+  assert.equal(hoursFromUserWords('给小齐增加课时'), undefined);
+  assert.equal(hoursFromUserWords('不要给小齐加1课时'), undefined);
+  assert.equal(hoursFromUserWords('给小齐增加1课时，再扣0.5课时'), undefined);
+});
+
+test('模型把增加1课时误写成1个百分之一课时，预览仍按100提交', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (!body.tools) return Response.json({ choices: [{ message: { content: JSON.stringify({ mode: 'action' }) } }] });
+    return Response.json({ choices: [{ message: { tool_calls: [{ function: { name: 'submit_course_action_plan',
+      arguments: JSON.stringify({ actions: [{ kind: 'hours_adjust', filters: { username: '小齐' }, amountHundredths: 1, note: '补缴' }] }),
+    } }] } }] });
+  };
+  try {
+    const env = await modelEnv();
+    env.MAIN_APP = { fetch: async () => Response.json({ data: [{ id: 7, username: '小齐', display_name: '小齐',
+      role: 'STUDENT', status: 'ACTIVE', remaining_hundredths: 300 }] }) } as Fetcher;
+    const plan = await planAgentTurn(env, new Request('https://qcp.dpdns.org/assistant/api/interpret'),
+      { id: 1, role: 'ADMIN', displayName: '管理员', status: 'ACTIVE' } as User,
+      '给小齐增加1个课时，原因：补缴', [], []);
+    assert.equal(plan.actions[0].action.kind, 'hours_adjust');
+    if (plan.actions[0].action.kind === 'hours_adjust') assert.equal(plan.actions[0].action.amountHundredths, 100);
+    assert.match(plan.actions[0].label, /\+1 课时/);
+    assert.match(plan.actions[0].label, /3 → 4/);
+    assert.equal(plan.actions[0].risk, true);
+  } finally { globalThis.fetch = originalFetch; }
 });
