@@ -148,18 +148,22 @@ function App() {
         if (offset === 9500) throw new Error('匹配课程超过 10000 条，请缩小导出范围');
       }
       const { Workbook } = await import('exceljs');
-      const book = new Workbook(); const sheet = book.addWorksheet('课程');
+      const book = new Workbook(); const sheet = book.addWorksheet('排课记录');
       sheet.columns = [
-        { header: '日期', key: 'date', width: 16 }, { header: '时间', key: 'time', width: 20 },
-        { header: '科目', key: 'subject', width: 20 }, { header: '教师', key: 'teacher', width: 16 },
-        { header: '学生', key: 'students', width: 28 }, { header: '教室', key: 'classroom', width: 16 },
-        { header: '完课', key: 'completed', width: 12 },
+        { header: '日期', key: 'date', width: 14 }, { header: '时间', key: 'time', width: 16 },
+        { header: '科目', key: 'subject', width: 20 }, { header: '教师', key: 'teacher', width: 14 },
+        { header: '学生', key: 'student', width: 14 }, { header: '教室', key: 'room', width: 16 },
+        { header: '课时', key: 'hours', width: 10 }, { header: '状态', key: 'status', width: 10 },
       ];
       const safe = (value: unknown) => { const text = String(value ?? ''); return /^[=+\-@]/.test(text) ? `'${text}` : text; };
-      rows.forEach((row) => sheet.addRow({ date: row.class_date, time: `${row.start_time}–${row.end_time}`, subject: safe(row.subject), teacher: safe(row.teacher_name), students: safe(Array.isArray(row.student_names) ? row.student_names.join('、') : ''), classroom: safe(row.classroom), completed: row.is_completed ? '是' : '否' }));
+      rows.forEach((row) => sheet.addRow({ date: row.class_date, time: `${row.start_time}-${row.end_time}`, subject: safe(row.subject), teacher: safe(row.teacher_name), student: safe(Array.isArray(row.student_names) ? row.student_names.join('、') : ''), room: safe(row.classroom), hours: Number(row.lesson_hundredths) / 100, status: row.is_completed ? '已完课' : '未完课' }));
+      sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF315C4D' } };
       const buffer = await book.xlsx.writeBuffer();
       const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
-      const link = document.createElement('a'); link.href = url; link.download = `课程导出-${new Date().toISOString().slice(0, 10)}.xlsx`; link.click(); URL.revokeObjectURL(url);
+      const today = new Date();
+      const date = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
+      const link = document.createElement('a'); link.href = url; link.download = `排课记录-${date}.xlsx`; link.click(); URL.revokeObjectURL(url);
     } catch (reason) { setError(reason instanceof Error ? reason.message : '导出失败'); }
     finally { setBusy(false); }
   }
