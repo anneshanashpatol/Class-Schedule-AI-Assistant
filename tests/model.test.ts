@@ -3,15 +3,51 @@ import assert from 'node:assert/strict';
 import { explainFailure, parseInstruction, testModel } from '../server/model';
 import { ApiFailure, type Env } from '../server/core';
 
-async function configuredEnv(): Promise<Env> {
+async function configuredEnv(model = 'XingChenAGI/Xing4.0-29B', endpoint = 'https://api.siliconflow.cn/v1/chat/completions'): Promise<Env> {
   const raw = crypto.getRandomValues(new Uint8Array(32));
   const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt']);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode('test-key')));
   const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-  const row = { endpoint: 'https://api.siliconflow.cn/v1/chat/completions', model: 'XingChenAGI/Xing4.0-29B', key_ciphertext: encode(cipher), key_iv: encode(iv) };
+  const row = { endpoint, model, key_ciphertext: encode(cipher), key_iv: encode(iv) };
   return { AI_CONFIG_KEY: encode(raw), AI_DB: { prepare: () => ({ first: async () => row }) } as unknown as D1Database } as Env;
 }
+
+test('GLM 原生 Tool Call 可提交操作计划且只请求一次模型', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls++;
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.tools[0].function.name, 'submit_course_action_plan');
+    assert.equal(body.response_format, undefined);
+    return Response.json({ choices: [{ message: { tool_calls: [{ function: { name: 'submit_course_action_plan',
+      arguments: JSON.stringify({ actions: [{ kind: 'schedule_completion', filters: { participantName: '张晓燕', dateFrom: '2026-09-27', dateTo: '2026-09-27', period: 'afternoon' }, completed: true }] }),
+    } }] } }] });
+  };
+  try {
+    const plan = await parseInstruction(await configuredEnv('THUDM/GLM-4-9B-0414'), '张晓燕明天下午的课设置成已完课', [], 'ADMIN');
+    assert.equal(calls, 1);
+    assert.equal(plan.actions[0].kind, 'schedule_completion');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('服务商拒绝 tools 时当次回退一次到 JSON', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls++;
+    const body = JSON.parse(String(init?.body));
+    if (calls === 1) { assert.ok(body.tools); return new Response('', { status: 400 }); }
+    assert.equal(body.tools, undefined);
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ actions: [], reply: '我可以帮你查课程。' }) } }] });
+  };
+  try {
+    const plan = await parseInstruction(await configuredEnv('THUDM/GLM-4-9B-0414', 'https://api-st.siliconflow.cn/v1/chat/completions'), '你好', [], 'ADMIN');
+    assert.equal(calls, 2);
+    assert.equal(plan.reply, '我可以帮你查课程。');
+  } finally { globalThis.fetch = originalFetch; }
+});
 
 test('连接失败时不向页面暴露底层网络异常', async () => {
   const originalFetch = globalThis.fetch;

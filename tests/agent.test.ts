@@ -92,6 +92,32 @@ test('取消刚才的操作会清掉目标，不会误当成撤销完课', async
   assert.match(plan.reply ?? '', /不继续/);
 });
 
+test('礼貌结束不会把上一轮写操作重新交给模型执行', async () => {
+  const plan = await planAgentTurn({} as Env, new Request('https://qcp.dpdns.org/assistant/api/interpret'),
+    { id: 1, role: 'ADMIN', displayName: '管理员', status: 'ACTIVE' } as User,
+    '谢谢，先这样', [{ role: 'assistant', text: '我找到了两节，请选择' }], [], 'schedule_completion');
+  assert.deepEqual(plan.actions, []);
+  assert.equal(plan.intentKind, undefined);
+  assert.match(plan.reply ?? '', /随时/);
+});
+
+test('课程助手能力问答只生成自然回复，不重放上一轮工具调用', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.tools, undefined);
+    assert.equal(body.messages.at(-1).content, '你能做什么？');
+    return Response.json({ choices: [{ message: { content: '我可以帮你查询课程、排课和调整完课状态。' } }] });
+  };
+  try {
+    const plan = await planAgentTurn(await modelEnv(), new Request('https://qcp.dpdns.org/assistant/api/interpret'),
+      { id: 1, role: 'ADMIN', displayName: '管理员', status: 'ACTIVE' } as User,
+      '你能做什么？', [{ role: 'assistant', text: '我找到了两节，请选择' }], [], 'schedule_completion');
+    assert.deepEqual(plan.actions, []);
+    assert.match(plan.reply ?? '', /查询课程/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('一次只允许一个删除操作', () => {
   assert.throws(() => expandActions([
     { kind: 'schedule_delete', filters: { dateFrom: '2026-09-27' } },
