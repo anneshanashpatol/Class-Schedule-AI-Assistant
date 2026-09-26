@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { actionSchema, ApiFailure, type Action, type Env, type Role } from './core';
 import { agentInstructions } from './agent-instructions.generated';
-import { skillPrompt, skills } from './skills';
+import { detectIntent, skillPrompt, skills } from './skills';
 
 interface SettingRow { endpoint: string; model: string; key_ciphertext: string; key_iv: string }
 const planTool = { type: 'function', function: { name: 'submit_course_action_plan',
@@ -87,7 +87,7 @@ async function completion(env: Env, messages: { role: 'system' | 'user' | 'assis
       method: 'POST', redirect: 'manual', signal: controller.signal,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: row.model, messages, temperature: 0, max_tokens: maxTokens, stream: false,
-        ...(useTools ? { tools: [planTool], tool_choice: 'auto' }
+        ...(useTools ? { tools: [planTool], tool_choice: { type: 'function', function: { name: planTool.function.name } } }
           : jsonMode && new URL(row.endpoint).hostname.endsWith('.siliconflow.cn') ? { response_format: { type: 'json_object' } } : {}) }),
     });
     if (response.status >= 300 && response.status < 400) throw new ApiFailure(502, 'MODEL_REDIRECT', '模型接口返回重定向；为保护 API Key，已拒绝跟随，请填写最终 HTTPS 地址');
@@ -157,6 +157,27 @@ export async function explainFailure(env: Env, kind: Action['kind'], error: stri
 const modelOutput = z.object({ question: z.string().max(300).optional(), reply: z.string().max(1000).optional(),
   intentKind: z.enum(Object.keys(skills) as [Action['kind'], ...Action['kind'][]]).optional(), actions: z.array(actionSchema).max(20) });
 export interface ConversationTurn { role: 'user' | 'assistant'; text: string }
+const turnDecision = z.object({ mode: z.enum(['action', 'reply', 'cancel']), reply: z.string().max(600).optional(), request: z.string().max(600).optional() });
+export async function decideTurn(env: Env, input: string, context: ConversationTurn[], role: Role,
+  activeKind?: Action['kind'], pendingActions: Action[] = []): Promise<{ mode: 'action' | 'reply' | 'cancel'; reply?: string; request?: string }> {
+  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+    { role: 'system', content: `你是课程小助手的对话判断器。当前身份 ${role}。判断最后一句用户话语，并只输出 JSON：{"mode":"action|reply|cancel","reply":"自然回复","request":"完整操作请求"}。
+action：用户明确要求查询真实课程/用户/余额、导出，或新增、修改、删除、完课；也包括对先前具体操作提供补充信息。只有 action 才会进入业务工具流程。
+reply 是默认选项：打招呼、感谢、纠正误解、反问、问功能或规则、闲聊，或用户还没明确要求实际操作。只在用户明确要求真实数据或业务操作时选 action。不确定就选 reply 并自然追问。结合最近对话像普通聊天一样简短回应，不主动介绍功能、列菜单或推销操作，别编造查询或执行结果。若用户问缺什么，指出当前任务真正缺的字段；已有姓名、日期、科目和完课意图时无需再索要具体上课时间或课程全部信息，应先搜索匹配课程。
+cancel：用户明确取消上一任务或指出你未经要求做了某项操作；简短承认并停止沿用旧目标。
+当前句优先于旧目标；不能因旧目标或历史中出现工具词就重复操作。action 时把当前句和仍相关的先前线索合并为 request，保留用户实际给过的姓名、日期、时段、科目、操作，不补造条件。日期必须保留“今天/明天/后天”的原词，不能自行换算。reply/cancel 必须有 reply。只输出 JSON。` },
+    { role: 'user', content: JSON.stringify({ activeKind, pendingActions: pendingActions.slice(0, 2).map((action) => ({ kind: action.kind })),
+      recentConversation: context.slice(-6).map((turn) => ({ role: turn.role, text: turn.text.slice(0, 350) })) }) },
+    { role: 'user', content: input.slice(0, 1000) },
+  ];
+  const output = await completion(env, messages, 300, true, 12000);
+  let parsed: unknown;
+  try { parsed = JSON.parse(output.trim().replace(/^```(?:json)?\s*|\s*```$/gi, '').trim()); } catch { /* Safe fallback below. */ }
+  const result = turnDecision.safeParse(parsed);
+  if (result.success && (result.data.mode === 'action' || result.data.reply?.trim()))
+    return { mode: result.data.mode, reply: result.data.reply?.trim(), request: result.data.request?.trim() };
+  return { mode: 'reply', reply: await answerConversation(env, input, context, role) };
+}
 function omitNullFields(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(omitNullFields);
   if (value && typeof value === 'object') {
@@ -185,6 +206,10 @@ function normalizeModelOutput(value: unknown): unknown {
       }
       const periods: Record<string, string> = { 上午: 'morning', 下午: 'afternoon', 晚上: 'evening' };
       if (typeof filters.period === 'string') filters.period = periods[filters.period] ?? filters.period;
+      if (action.kind === 'schedule_completion' && typeof filters.completed === 'boolean') {
+        action.completed ??= filters.completed;
+        delete filters.completed;
+      } else if (typeof filters.completed === 'boolean') filters.completed = String(filters.completed);
       action.filters = filters;
     }
     if (action.kind === 'schedule_completion' && (action.completed === 'true' || action.completed === 'false')) action.completed = action.completed === 'true';
@@ -192,13 +217,15 @@ function normalizeModelOutput(value: unknown): unknown {
   }) };
 }
 export async function parseInstruction(env: Env, input: string, context: ConversationTurn[], role: Role, pendingActions: Action[] = [], activeKind?: Action['kind']): Promise<{ question?: string; reply?: string; intentKind?: Action['kind']; actions: Action[] }> {
+  const detected = detectIntent(input, pendingActions, activeKind);
+  const skillHint = detected.certain ? detected.kind : input.length < 24 ? activeKind : undefined;
   const now = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'short' }).format(new Date());
   const today = now.slice(0, 10);
   const tomorrow = new Date(`${today}T00:00:00Z`);
   tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
   const tomorrowDate = tomorrow.toISOString().slice(0, 10);
   const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
-    { role: 'system', content: `${agentInstructions}\n当前账号是${role === 'ADMIN' ? '管理员' : role === 'TEACHER' ? '教师' : '学生'}。${activeKind ? `上轮目标是 ${activeKind}（${skills[activeKind].name}）；若当前消息只是补充，继续该目标，不重新要求已有线索。` : ''}你可以在全部能力中选择本轮需要的工具。若用户转到新目标，以新目标为准；若只是闲聊或致谢，自然回复且 actions 为空，不能重复执行操作。\n${skillPrompt()}\n现在北京时间：${now}。今天是 ${today}，明天是 ${tomorrowDate}。将相对日期换算成明确日期。无权限时使用 reply 和空 actions。` },
+    { role: 'system', content: `${agentInstructions}\n当前账号是${role === 'ADMIN' ? '管理员' : role === 'TEACHER' ? '教师' : '学生'}。${activeKind ? `上轮目标是 ${activeKind}（${skills[activeKind].name}）；若当前消息只是补充，继续该目标，不重新要求已有线索。` : ''}你可以在全部能力中选择本轮需要的工具。若用户转到新目标，以新目标为准；若只是闲聊或致谢，自然回复且 actions 为空，不能重复执行操作。\n${skillPrompt(skillHint)}\n现在北京时间：${now}。今天是 ${today}，明天是 ${tomorrowDate}。将相对日期换算成明确日期。无权限时使用 reply 和空 actions。` },
     { role: 'user', content: JSON.stringify({ recentConversation: context.slice(-8).map((turn) => ({ role: turn.role, text: turn.text.slice(0, 500) })), pendingActions: pendingActions.slice(0, 3), instruction: input.slice(0, 1000) }) },
   ];
   let content = await completion(env, messages, 4096, true, 45000, true);
@@ -214,8 +241,8 @@ export async function parseInstruction(env: Env, input: string, context: Convers
     if (attempt === 0) {
       const issues = result.error.issues.slice(0, 5).map((issue) => `${issue.path.join('.') || '顶层'}: ${issue.message}`);
       content = await completion(env, [
-        { role: 'system', content: `修正课程助手的 JSON 输出。只输出 JSON 对象，顶层为 actions 数组，可有 question 字符串。${skillPrompt()}若目标或意图仍不清楚，返回 question 和空 actions，不猜课程 ID。` },
-        { role: 'user', content: JSON.stringify({ now, role, instruction: input.slice(0, 1000), previousOutput: content.slice(0, 2000), validationErrors: issues }) },
+        { role: 'system', content: `修正课程助手的 JSON 输出。只输出 JSON 对象，顶层为 actions 数组，可有 question 字符串。${skillPrompt(skillHint)}已有姓名、日期、科目等线索的完课请求应生成 schedule_completion，让 Worker 查询候选课程；不要索取课程全部字段或猜课程 ID。` },
+        { role: 'user', content: JSON.stringify({ now, role, activeKind, recentConversation: context.slice(-8), pendingActions: pendingActions.slice(0, 3), instruction: input.slice(0, 1000), previousOutput: content.slice(0, 2000), validationErrors: issues }) },
       ], 2048, true);
     }
   }
@@ -227,7 +254,7 @@ export async function parseInstruction(env: Env, input: string, context: Convers
 
 export async function answerConversation(env: Env, input: string, context: ConversationTurn[], role: Role): Promise<string> {
   const answer = await completion(env, [
-    { role: 'system', content: `你是前程π课程小助手。当前账号身份：${role}。只回答最后一条用户消息，用自然、简洁的中文。你可介绍排课、查课、完课、课时和账号管理的能力与确认流程，但不能编造实时课程、用户、余额或执行结果。若问题需要真实数据，说明可以帮用户查询。不要输出 JSON。` },
+    { role: 'system', content: `你是前程π课程小助手。当前账号身份：${role}。像正常聊天助手一样，根据最近对话自然、简洁地回答最后一条消息；别主动罗列功能或重复菜单。用户问能力时可以介绍查课、排课、完课、课时和账号管理。不能编造实时课程、用户、余额或执行结果；需要真实数据时可以提出帮用户查询。不要输出 JSON。` },
     ...context.slice(-6).map((turn) => ({ role: turn.role, content: turn.text.slice(0, 500) })),
     { role: 'user', content: input.slice(0, 1000) },
   ], 400, false, 12000);

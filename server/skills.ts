@@ -75,7 +75,7 @@ export function skillPrompt(kind?: Kind): string {
 }
 
 const intentSignals: Partial<Record<Kind, RegExp>> = {
-  schedule_completion: /(?:点完课|标记.{0,5}完课|设(?:置)?.{0,5}完课|改为.{0,3}完课|取消完课|撤销完课|完课状态)/,
+  schedule_completion: /(?:点完课|标记.{0,5}完课|设(?:置)?.{0,5}完课|改(?:为|成).{0,3}完课|取消完课|撤销完课|完课状态)/,
   schedule_delete: /(?:删(?:掉|除)?.{0,8}(?:课程|这节课|的课)|删课)/,
   schedule_create: /(?:排课|安排.{0,8}(?:上课|课程|一节课)|新增课程)/,
   schedule_update: /(?:编辑课程|修改.{0,8}(?:课程|上课时间|教室|科目)|改.{0,8}(?:上课时间|教室|科目))的?/,

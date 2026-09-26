@@ -84,13 +84,17 @@ function App() {
     event?.preventDefault();
     if (!input.trim() || busy) return;
     const message = input.trim();
-    setInput(''); setBusy(true); setError(''); setPreview(null); setResult(null);
+    setInput(''); setBusy(true); setError(''); setResult(null);
     const context = history.slice(-8).map((item) => ({ role: item.role, text: item.text.slice(0, 500) }));
     const pendingActions = preview?.question ? preview.actions.slice(0, 3).map((item) => item.action) : [];
     setHistory((items) => [...items, { role: 'user', text: message }]);
     try {
       const next = await api<Preview>('/interpret', { method: 'POST', body: JSON.stringify({ input: message, context, pendingActions, activeIntent }) });
-      setPreview(next.actions.length ? next : null); setSelection({}); setApproval([]); setPasswords({});
+      if (next.actions.length) {
+        setPreview(next); setSelection({}); setApproval([]); setPasswords({});
+      } else if (!next.intentKind) {
+        setPreview(null); setSelection({}); setApproval([]); setPasswords({});
+      }
       setActiveIntent(next.intentKind ?? null);
       setHistory((items) => [...items, { role: 'assistant', text: assistantSummary(next) }]);
     } catch (reason) {

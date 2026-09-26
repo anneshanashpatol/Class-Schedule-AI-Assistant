@@ -20,6 +20,7 @@ test('GLM 原生 Tool Call 可提交操作计划且只请求一次模型', async
     calls++;
     const body = JSON.parse(String(init?.body));
     assert.equal(body.tools[0].function.name, 'submit_course_action_plan');
+    assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'submit_course_action_plan' } });
     assert.equal(body.response_format, undefined);
     return Response.json({ choices: [{ message: { tool_calls: [{ function: { name: 'submit_course_action_plan',
       arguments: JSON.stringify({ actions: [{ kind: 'schedule_completion', filters: { participantName: '张晓燕', dateFrom: '2026-09-27', dateTo: '2026-09-27', period: 'afternoon' }, completed: true }] }),
@@ -29,6 +30,20 @@ test('GLM 原生 Tool Call 可提交操作计划且只请求一次模型', async
     const plan = await parseInstruction(await configuredEnv('THUDM/GLM-4-9B-0414'), '张晓燕明天下午的课设置成已完课', [], 'ADMIN');
     assert.equal(calls, 1);
     assert.equal(plan.actions[0].kind, 'schedule_completion');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('完课工具把 completed 放进 filters 时仍能提取并校验', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ choices: [{ message: { tool_calls: [{ function: {
+    name: 'submit_course_action_plan', arguments: JSON.stringify({ actions: [{ kind: 'schedule_completion',
+      filters: { participantName: '小齐', dateFrom: '2026-09-27', dateTo: '2026-09-27', completed: true } }] }),
+  } }] } }] });
+  try {
+    const plan = await parseInstruction(await configuredEnv('THUDM/GLM-4-9B-0414'), '把明天小齐的课改成已完课', [], 'ADMIN');
+    assert.deepEqual(plan.actions, [{ kind: 'schedule_completion', filters: {
+      participantName: '小齐', dateFrom: '2026-09-27', dateTo: '2026-09-27',
+    }, completed: true }]);
   } finally { globalThis.fetch = originalFetch; }
 });
 

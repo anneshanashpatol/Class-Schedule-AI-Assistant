@@ -45,7 +45,9 @@ test('模型选择完课工具后，Worker 用姓名日期时段查真实课程�
   let calls = 0;
   globalThis.fetch = async (_input, init) => {
     calls++;
-    prompt = JSON.parse(String(init?.body)).messages[0].content;
+    const body = JSON.parse(String(init?.body));
+    if (!body.tools) return Response.json({ choices: [{ message: { content: JSON.stringify({ mode: 'action', request: '张晓燕明天下午的课帮我设置成已完课' }) } }] });
+    prompt = body.messages[0].content;
     return Response.json({ choices: [{ message: { content: JSON.stringify({ actions: [{ kind: 'schedule_completion',
       filters: { participantName: '张晓燕', dateFrom: '2026-09-27', dateTo: '2026-09-27', period: 'afternoon' }, completed: true }] }) } }] });
   };
@@ -58,7 +60,7 @@ test('模型选择完课工具后，Worker 用姓名日期时段查真实课程�
     const plan = await planAgentTurn(await modelEnv(lessons), new Request('https://qcp.dpdns.org/assistant/api/interpret'),
       { id: 1, role: 'ADMIN', displayName: '管理员', status: 'ACTIVE' } as User,
       '张晓燕明天下午的课帮我设置成已完课', [], []);
-    assert.equal(calls, 1);
+    assert.equal(calls, 2);
     assert.match(prompt, /查询真实课程/);
     assert.deepEqual(plan.actions[0].candidates?.map((item) => item.id), [2, 3]);
     assert.equal(plan.actions[0].selected, undefined);
@@ -70,7 +72,9 @@ test('追问后的补充沿用页面目标，同时模型仍可选择其他能�
   const originalFetch = globalThis.fetch;
   let prompt = '';
   globalThis.fetch = async (_input, init) => {
-    prompt = JSON.parse(String(init?.body)).messages[0].content;
+    const body = JSON.parse(String(init?.body));
+    if (!body.tools) return Response.json({ choices: [{ message: { content: JSON.stringify({ mode: 'action', request: '是下午那节' }) } }] });
+    prompt = body.messages[0].content;
     return Response.json({ choices: [{ message: { content: JSON.stringify({ reply: '好的，我记得是在找那节课。', actions: [] }) } }] });
   };
   try {
@@ -79,7 +83,7 @@ test('追问后的补充沿用页面目标，同时模型仍可选择其他能�
       '是下午那节', [{ role: 'assistant', text: '你说的是哪一节？' }], [], 'schedule_completion');
     assert.equal(plan.intentKind, 'schedule_completion');
     assert.match(prompt, /上轮目标是 schedule_completion/);
-    assert.match(prompt, /user_search/);
+    assert.match(prompt, /schedule_completion/);
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -107,7 +111,7 @@ test('课程助手能力问答只生成自然回复，不重放上一轮工具�
     const body = JSON.parse(String(init?.body));
     assert.equal(body.tools, undefined);
     assert.equal(body.messages.at(-1).content, '你能做什么？');
-    return Response.json({ choices: [{ message: { content: '我可以帮你查询课程、排课和调整完课状态。' } }] });
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ mode: 'reply', reply: '我可以帮你查询课程、排课和调整完课状态。' }) } }] });
   };
   try {
     const plan = await planAgentTurn(await modelEnv(), new Request('https://qcp.dpdns.org/assistant/api/interpret'),
@@ -115,6 +119,56 @@ test('课程助手能力问答只生成自然回复，不重放上一轮工具�
       '你能做什么？', [{ role: 'assistant', text: '我找到了两节，请选择' }], [], 'schedule_completion');
     assert.deepEqual(plan.actions, []);
     assert.match(plan.reply ?? '', /查询课程/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('问候与纠错默认走对话，不查询管理员或重放旧目标', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls++;
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.tools, undefined);
+    const input = body.messages.at(-1).content;
+    return Response.json({ choices: [{ message: { content: JSON.stringify(input === '你好'
+      ? { mode: 'reply', reply: '你好，今天想聊点什么？' }
+      : { mode: 'cancel', reply: '抱歉，我理解错了，不会继续查询管理员。' }) } }] });
+  };
+  try {
+    const env = await modelEnv();
+    const request = new Request('https://qcp.dpdns.org/assistant/api/interpret');
+    const user = { id: 1, role: 'ADMIN', displayName: '管理员', status: 'ACTIVE' } as User;
+    const greeting = await planAgentTurn(env, request, user, '你好', [], []);
+    assert.deepEqual(greeting.actions, []);
+    assert.match(greeting.reply ?? '', /想聊什么/);
+    const correction = await planAgentTurn(env, request, user, '我没让你查管理员呀', [
+      { role: 'user', text: '你好' }, { role: 'assistant', text: '查到了三个管理员' },
+    ], [], 'user_search');
+    assert.deepEqual(correction.actions, []);
+    assert.equal(correction.intentKind, undefined);
+    assert.equal(calls, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('完课请求先找真实候选，移除模型凭空加的上午条件', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (!body.tools) return Response.json({ choices: [{ message: { content: JSON.stringify({ mode: 'action', request: '把明天学生小齐的英语课改成已完课' }) } }] });
+    return Response.json({ choices: [{ message: { content: JSON.stringify({ actions: [{ kind: 'schedule_completion',
+      filters: { participantName: '小齐', dateFrom: '2026-09-27', dateTo: '2026-09-27', subject: '英语', period: 'morning' }, completed: true }] }) } }] });
+  };
+  try {
+    const lessons = [
+      { id: 1, teacher_name: '李老师', student_names: ['小齐'], subject: '英语', class_date: '2026-09-27', start_time: '10:00', end_time: '11:00', classroom: '', is_completed: 0, version: 1 },
+      { id: 2, teacher_name: '王老师', student_names: ['小齐'], subject: '英语', class_date: '2026-09-27', start_time: '14:00', end_time: '15:00', classroom: '', is_completed: 0, version: 1 },
+    ];
+    const plan = await planAgentTurn(await modelEnv(lessons), new Request('https://qcp.dpdns.org/assistant/api/interpret'),
+      { id: 1, role: 'ADMIN', displayName: '管理员', status: 'ACTIVE' } as User,
+      '把明天学生：小齐的英语课改成已完课', [], []);
+    assert.equal(plan.actions[0].action.kind, 'schedule_completion');
+    assert.deepEqual(plan.actions[0].candidates?.map((item) => item.id), [1, 2]);
+    assert.equal(plan.actions[0].selected, undefined);
   } finally { globalThis.fetch = originalFetch; }
 });
 
